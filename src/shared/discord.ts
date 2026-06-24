@@ -81,12 +81,11 @@ export async function postWebhook(webhookUrl: string | undefined, content: strin
 }
 
 export function optionValue<T extends string | number | boolean>(interaction: DiscordInteraction, name: string): T | undefined {
-  const asaGroup = interaction.data?.options?.find((option) => option.name === "asa");
-  const options = asaGroup?.options ?? interaction.data?.options ?? [];
+  const subcommand = interaction.data?.options?.[0];
+  const options = subcommand?.options ?? interaction.data?.options ?? [];
   return options.find((option) => option.name === name)?.value as T | undefined;
 }
 
 export function subcommandName(interaction: DiscordInteraction): string | undefined {
   return interaction.data?.options?.[0]?.name;
 }
-

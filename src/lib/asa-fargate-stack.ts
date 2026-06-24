@@ -1,0 +1,440 @@
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import * as cdk from "aws-cdk-lib";
+import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
+import * as integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
+import * as budgets from "aws-cdk-lib/aws-budgets";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as ec2 from "aws-cdk-lib/aws-ec2";
+import * as ecrAssets from "aws-cdk-lib/aws-ecr-assets";
+import * as ecs from "aws-cdk-lib/aws-ecs";
+import * as events from "aws-cdk-lib/aws-events";
+import * as targets from "aws-cdk-lib/aws-events-targets";
+import * as iam from "aws-cdk-lib/aws-iam";
+import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as lambdaNodejs from "aws-cdk-lib/aws-lambda-nodejs";
+import * as logs from "aws-cdk-lib/aws-logs";
+import * as route53 from "aws-cdk-lib/aws-route53";
+import * as s3 from "aws-cdk-lib/aws-s3";
+import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
+import { Construct } from "constructs";
+import { parameterNames, secretNames } from "../shared/config.js";
+
+const dirname = path.dirname(fileURLToPath(import.meta.url));
+const rootDir = path.resolve(dirname, "../..");
+
+interface NumberContext {
+  name: string;
+  defaultValue: number;
+}
+
+function numberContext(scope: Construct, props: NumberContext): number {
+  const value = scope.node.tryGetContext(props.name);
+  if (value === undefined || value === null || value === "") return props.defaultValue;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`Context ${props.name} must be a number.`);
+  return parsed;
+}
+
+function booleanContext(scope: Construct, name: string, defaultValue: boolean): boolean {
+  const value = scope.node.tryGetContext(name);
+  if (value === undefined || value === null || value === "") return defaultValue;
+  return value === true || value === "true";
+}
+
+export class AsaFargateStack extends cdk.Stack {
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+    super(scope, id, props);
+
+    const region = this.node.tryGetContext("region") ?? cdk.Stack.of(this).region;
+    const cpu = numberContext(this, { name: "asaCpu", defaultValue: 2048 });
+    const memoryMiB = numberContext(this, { name: "asaMemoryMiB", defaultValue: 12288 });
+    const ephemeralStorageGiB = numberContext(this, { name: "asaEphemeralStorageGiB", defaultValue: 100 });
+    const stopTimeoutSeconds = numberContext(this, { name: "asaStopTimeoutSeconds", defaultValue: 120 });
+    const defaultSessionHours = numberContext(this, { name: "defaultSessionHours", defaultValue: 4 });
+    const maxSessionHours = numberContext(this, { name: "maxSessionHours", defaultValue: 8 });
+    const monthlyBudgetJpy = numberContext(this, { name: "monthlyBudgetJpy", defaultValue: 1500 });
+    const monthlyRuntimeHoursLimit = numberContext(this, { name: "monthlyRuntimeHoursLimit", defaultValue: 80 });
+    const enableOnDemandFallback = booleanContext(this, "enableOnDemandFallback", false);
+    const allowDiscordPasswordNotification = booleanContext(this, "allowDiscordPasswordNotification", false);
+    const enableAwsBudget = booleanContext(this, "enableAwsBudget", false);
+    const budgetEmail = this.node.tryGetContext("budgetEmail") as string | undefined;
+    const hostedZoneId = this.node.tryGetContext("hostedZoneId") as string | undefined;
+    const domainName = this.node.tryGetContext("domainName") as string | undefined;
+    const hasRoute53 = Boolean(hostedZoneId && domainName);
+
+    const vpc = new ec2.Vpc(this, "AsaVpc", {
+      maxAzs: 2,
+      natGateways: 0,
+      subnetConfiguration: [
+        {
+          name: "public",
+          subnetType: ec2.SubnetType.PUBLIC,
+          cidrMask: 24,
+        },
+      ],
+    });
+
+    const serverSecurityGroup = new ec2.SecurityGroup(this, "AsaServerSecurityGroup", {
+      vpc,
+      allowAllOutbound: true,
+      disableInlineRules: true,
+      description: "ASA Fargate task security group",
+    });
+    serverSecurityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.udp(7777), "ASA game port");
+    serverSecurityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.udp(7778), "ASA adjacent UDP port");
+    serverSecurityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.udp(27015), "Steam query port");
+
+    const stateBucket = new s3.Bucket(this, "AsaStateBucket", {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      versioned: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      lifecycleRules: [
+        { prefix: "backups/", expiration: cdk.Duration.days(30) },
+        { prefix: "logs/", expiration: cdk.Duration.days(14) },
+      ],
+    });
+
+    const stateTable = new dynamodb.Table(this, "AsaServerStateTable", {
+      partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    const cluster = new ecs.Cluster(this, "AsaCluster", {
+      vpc,
+    });
+    cluster.enableFargateCapacityProviders();
+
+    const imageAsset = new ecrAssets.DockerImageAsset(this, "AsaServerImage", {
+      directory: path.join(rootDir, "container"),
+    });
+
+    const ecsLogGroup = new logs.LogGroup(this, "AsaEcsLogGroup", {
+      logGroupName: "/asa/ecs/server",
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const notificationWebhookSecret = secretsmanager.Secret.fromSecretNameV2(this, "NotificationWebhookSecret", secretNames.notificationWebhookUrl);
+    const serverPasswordSecret = secretsmanager.Secret.fromSecretNameV2(this, "ServerPasswordSecret", secretNames.serverPassword);
+    const adminPasswordSecret = secretsmanager.Secret.fromSecretNameV2(this, "ServerAdminPasswordSecret", secretNames.serverAdminPassword);
+
+    const taskDefinition = new ecs.FargateTaskDefinition(this, "AsaTaskDefinition", {
+      cpu,
+      memoryLimitMiB: memoryMiB,
+      ephemeralStorageGiB,
+      runtimePlatform: {
+        operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+        cpuArchitecture: ecs.CpuArchitecture.X86_64,
+      },
+    });
+
+    taskDefinition.addContainer("AsaServerContainer", {
+      image: ecs.ContainerImage.fromDockerImageAsset(imageAsset),
+      essential: true,
+      stopTimeout: cdk.Duration.seconds(stopTimeoutSeconds),
+      logging: ecs.LogDrivers.awsLogs({
+        logGroup: ecsLogGroup,
+        streamPrefix: "asa",
+      }),
+      portMappings: [
+        { containerPort: 7777, protocol: ecs.Protocol.UDP },
+        { containerPort: 7778, protocol: ecs.Protocol.UDP },
+        { containerPort: 27015, protocol: ecs.Protocol.UDP },
+      ],
+      environment: {
+        AWS_REGION: region,
+        S3_BUCKET: stateBucket.bucketName,
+        S3_SAVE_KEY: "saves/current.tar.zst",
+        S3_BACKUP_PREFIX: "backups/",
+        ASA_APP_ID: "2430930",
+        ASA_INSTALL_DIR: "/asa/server",
+        ASA_MAP: "TheIsland_WP",
+        ASA_SESSION_NAME: "private-asa",
+        ASA_MAX_PLAYERS: "4",
+        ASA_PORT: "7777",
+        ASA_QUERY_PORT: "27015",
+        ASA_RCON_PORT: "27020",
+        ASA_DISABLE_BATTLEYE: "true",
+        AUTO_BACKUP_INTERVAL_SECONDS: "600",
+        BACKUP_REQUEST_KEY: "runtime/backup-request.json",
+      },
+      secrets: {
+        DISCORD_WEBHOOK_URL: ecs.Secret.fromSecretsManager(notificationWebhookSecret),
+        ASA_SERVER_PASSWORD: ecs.Secret.fromSecretsManager(serverPasswordSecret),
+        ASA_ADMIN_PASSWORD: ecs.Secret.fromSecretsManager(adminPasswordSecret),
+      },
+    });
+
+    imageAsset.repository.grantPull(taskDefinition.executionRole!);
+    notificationWebhookSecret.grantRead(taskDefinition.executionRole!);
+    serverPasswordSecret.grantRead(taskDefinition.executionRole!);
+    adminPasswordSecret.grantRead(taskDefinition.executionRole!);
+
+    taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:ListBucket"],
+        resources: [stateBucket.bucketArn],
+        conditions: {
+          StringLike: {
+            "s3:prefix": ["config/*", "saves/*", "runtime/*", "backups/*"],
+          },
+        },
+      }),
+    );
+    taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:GetObject"],
+        resources: [
+          stateBucket.arnForObjects("config/*"),
+          stateBucket.arnForObjects("saves/*"),
+          stateBucket.arnForObjects("runtime/*"),
+        ],
+      }),
+    );
+    taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:PutObject"],
+        resources: [
+          stateBucket.arnForObjects("saves/*"),
+          stateBucket.arnForObjects("backups/*"),
+          stateBucket.arnForObjects("runtime/*"),
+          stateBucket.arnForObjects("logs/*"),
+        ],
+      }),
+    );
+
+    const stopSchedulerRole = new iam.Role(this, "AsaStopSchedulerRole", {
+      assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com"),
+    });
+
+    const lambdaDefaults = {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.X86_64,
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node22",
+        format: lambdaNodejs.OutputFormat.ESM,
+        banner: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);",
+      },
+    } satisfies Partial<lambdaNodejs.NodejsFunctionProps>;
+
+    const commonEnvironment = {
+      TABLE_NAME: stateTable.tableName,
+      CLUSTER_ARN: cluster.clusterArn,
+      CLUSTER_NAME: cluster.clusterName,
+      TASK_DEFINITION_ARN: taskDefinition.taskDefinitionArn,
+      SUBNET_IDS: vpc.publicSubnets.map((subnet) => subnet.subnetId).join(","),
+      SECURITY_GROUP_ID: serverSecurityGroup.securityGroupId,
+      S3_BUCKET: stateBucket.bucketName,
+      STOP_SCHEDULE_NAME: "asa-auto-stop",
+      STOP_SCHEDULER_ROLE_ARN: stopSchedulerRole.roleArn,
+      DEFAULT_SESSION_HOURS: String(defaultSessionHours),
+      MAX_SESSION_HOURS: String(maxSessionHours),
+      MONTHLY_RUNTIME_HOURS_LIMIT: String(monthlyRuntimeHoursLimit),
+      MONTHLY_BUDGET_JPY: String(monthlyBudgetJpy),
+      ENABLE_ON_DEMAND_FALLBACK: String(enableOnDemandFallback),
+      ALLOW_DISCORD_PASSWORD_NOTIFICATION: String(allowDiscordPasswordNotification),
+      DOMAIN_NAME: domainName ?? "",
+    };
+
+    const discordInteractionsLogGroup = new logs.LogGroup(this, "DiscordInteractionsLogGroup", {
+      logGroupName: "/asa/lambda/discord-interactions",
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    const discordInteractions = new lambdaNodejs.NodejsFunction(this, "DiscordInteractionLambda", {
+      ...lambdaDefaults,
+      entry: path.join(rootDir, "src/lambdas/discord-interactions/index.ts"),
+      logGroup: discordInteractionsLogGroup,
+      environment: commonEnvironment,
+    });
+
+    const ecsTaskEventsLogGroup = new logs.LogGroup(this, "EcsTaskEventsLogGroup", {
+      logGroupName: "/asa/lambda/ecs-task-events",
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    const ecsTaskEvents = new lambdaNodejs.NodejsFunction(this, "EcsTaskEventsLambda", {
+      ...lambdaDefaults,
+      entry: path.join(rootDir, "src/lambdas/ecs-task-events/index.ts"),
+      logGroup: ecsTaskEventsLogGroup,
+      environment: {
+        ...commonEnvironment,
+        NOTIFICATION_WEBHOOK_SECRET_NAME: secretNames.notificationWebhookUrl,
+        HOSTED_ZONE_ID: hostedZoneId ?? "",
+      },
+    });
+
+    const stopServerLogGroup = new logs.LogGroup(this, "StopServerLogGroup", {
+      logGroupName: "/asa/lambda/stop-server",
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    const stopServer = new lambdaNodejs.NodejsFunction(this, "StopServerLambda", {
+      ...lambdaDefaults,
+      entry: path.join(rootDir, "src/lambdas/stop-server/index.ts"),
+      logGroup: stopServerLogGroup,
+      environment: {
+        ...commonEnvironment,
+        NOTIFICATION_WEBHOOK_SECRET_NAME: secretNames.notificationWebhookUrl,
+      },
+    });
+    stopServer.grantInvoke(stopSchedulerRole);
+    discordInteractions.addEnvironment("STOP_SERVER_FUNCTION_ARN", stopServer.functionArn);
+
+    const api = new apigwv2.HttpApi(this, "AsaDiscordHttpApi");
+    api.addRoutes({
+      path: "/discord/interactions",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new integrations.HttpLambdaIntegration("DiscordInteractionsPostIntegration", discordInteractions),
+    });
+
+    new events.Rule(this, "AsaTaskStateChangeRule", {
+      eventPattern: {
+        source: ["aws.ecs"],
+        detailType: ["ECS Task State Change"],
+        detail: {
+          clusterArn: [cluster.clusterArn],
+        },
+      },
+      targets: [new targets.LambdaFunction(ecsTaskEvents)],
+    });
+
+    stateTable.grantReadWriteData(discordInteractions);
+    stateTable.grantReadWriteData(ecsTaskEvents);
+    stateTable.grantReadWriteData(stopServer);
+    stateBucket.grantPut(discordInteractions, "runtime/*");
+    stateBucket.grantRead(discordInteractions, "runtime/*");
+
+    for (const fn of [discordInteractions, stopServer]) {
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["ecs:DescribeTasks", "ecs:StopTask"],
+          resources: ["*"],
+          conditions: {
+            ArnEquals: { "ecs:cluster": cluster.clusterArn },
+          },
+        }),
+      );
+    }
+    discordInteractions.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ecs:RunTask"],
+        resources: [taskDefinition.taskDefinitionArn],
+        conditions: {
+          ArnEquals: { "ecs:cluster": cluster.clusterArn },
+        },
+      }),
+    );
+    discordInteractions.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["iam:PassRole"],
+        resources: [taskDefinition.taskRole.roleArn, taskDefinition.executionRole!.roleArn],
+      }),
+    );
+    discordInteractions.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["scheduler:CreateSchedule", "scheduler:DeleteSchedule", "scheduler:GetSchedule"],
+        resources: [`arn:${cdk.Aws.PARTITION}:scheduler:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:schedule/default/asa-auto-stop`],
+      }),
+    );
+    discordInteractions.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["iam:PassRole"],
+        resources: [stopSchedulerRole.roleArn],
+      }),
+    );
+    stopServer.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["scheduler:DeleteSchedule", "scheduler:GetSchedule"],
+        resources: [`arn:${cdk.Aws.PARTITION}:scheduler:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:schedule/default/asa-auto-stop`],
+      }),
+    );
+    ecsTaskEvents.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ecs:DescribeTasks", "ec2:DescribeNetworkInterfaces"],
+        resources: ["*"],
+      }),
+    );
+
+    for (const fn of [discordInteractions, ecsTaskEvents, stopServer]) {
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["ssm:GetParameter", "ssm:GetParameters"],
+          resources: Object.values(parameterNames).map((name) => `arn:${cdk.Aws.PARTITION}:ssm:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:parameter${name}`),
+        }),
+      );
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["secretsmanager:GetSecretValue"],
+          resources: Object.values(secretNames).map((name) => `arn:${cdk.Aws.PARTITION}:secretsmanager:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:secret:${name.replace(/^\//, "")}*`),
+        }),
+      );
+    }
+
+    if (hasRoute53) {
+      const zone = route53.HostedZone.fromHostedZoneAttributes(this, "AsaHostedZone", {
+        hostedZoneId: hostedZoneId!,
+        zoneName: domainName!.split(".").slice(1).join("."),
+      });
+      ecsTaskEvents.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["route53:ChangeResourceRecordSets"],
+          resources: [zone.hostedZoneArn],
+        }),
+      );
+    }
+
+    if (enableAwsBudget) {
+      if (!budgetEmail) throw new Error("budgetEmail context is required when enableAwsBudget=true.");
+      new budgets.CfnBudget(this, "AsaMonthlyBudget", {
+        budget: {
+          budgetName: "asa-on-demand-monthly-budget",
+          budgetType: "COST",
+          timeUnit: "MONTHLY",
+          budgetLimit: {
+            amount: monthlyBudgetJpy,
+            unit: "JPY",
+          },
+        },
+        notificationsWithSubscribers: [
+          {
+            notification: {
+              comparisonOperator: "GREATER_THAN",
+              notificationType: "ACTUAL",
+              threshold: 80,
+              thresholdType: "PERCENTAGE",
+            },
+            subscribers: [{ subscriptionType: "EMAIL", address: budgetEmail }],
+          },
+          {
+            notification: {
+              comparisonOperator: "GREATER_THAN",
+              notificationType: "ACTUAL",
+              threshold: 100,
+              thresholdType: "PERCENTAGE",
+            },
+            subscribers: [{ subscriptionType: "EMAIL", address: budgetEmail }],
+          },
+        ],
+      });
+    }
+
+    new cdk.CfnOutput(this, "DiscordInteractionsEndpointUrl", {
+      value: `${api.apiEndpoint}/discord/interactions`,
+    });
+    new cdk.CfnOutput(this, "AsaStateBucketName", { value: stateBucket.bucketName });
+    new cdk.CfnOutput(this, "AsaClusterName", { value: cluster.clusterName });
+    new cdk.CfnOutput(this, "AsaTaskDefinitionArn", { value: taskDefinition.taskDefinitionArn });
+    new cdk.CfnOutput(this, "AsaSecurityGroupId", { value: serverSecurityGroup.securityGroupId });
+    new cdk.CfnOutput(this, "AsaStateTableName", { value: stateTable.tableName });
+    if (domainName) new cdk.CfnOutput(this, "OptionalDomainName", { value: domainName });
+  }
+}
