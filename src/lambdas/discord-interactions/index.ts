@@ -1,7 +1,7 @@
-import type { APIGatewayProxyStructuredResultV2, APIGatewayProxyEventV2 } from "aws-lambda";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ECSClient, RunTaskCommand, StopTaskCommand } from "@aws-sdk/client-ecs";
-import { SchedulerClient, CreateScheduleCommand, DeleteScheduleCommand } from "@aws-sdk/client-scheduler";
+import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { CreateScheduleCommand, DeleteScheduleCommand, SchedulerClient } from "@aws-sdk/client-scheduler";
+import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from "aws-lambda";
 import { canStart, hours, monthKey } from "../../shared/budget.js";
 import { getJsonArrayParameter, getParameter, getSecret, intEnv, parameterNames, requireEnv, secretNames } from "../../shared/config.js";
 import {
@@ -53,7 +53,10 @@ function rawBody(event: APIGatewayProxyEventV2): string {
 }
 
 function startOptions(interaction: DiscordInteraction) {
-  const durationHours = Math.min(Math.max(Number(optionValue<number>(interaction, "duration_hours") ?? defaultSessionHours), 1), maxSessionHours);
+  const durationHours = Math.min(
+    Math.max(Number(optionValue<number>(interaction, "duration_hours") ?? defaultSessionHours), 1),
+    maxSessionHours,
+  );
   const map = optionValue<string>(interaction, "map") ?? "TheIsland_WP";
   const maxPlayers = Math.min(Math.max(Number(optionValue<number>(interaction, "max_players") ?? 4), 1), 8);
   const publicNotify = optionValue<boolean>(interaction, "public_notify") ?? true;
@@ -61,12 +64,14 @@ function startOptions(interaction: DiscordInteraction) {
 }
 
 async function createStopSchedule(expiresAt: Date): Promise<void> {
-  await scheduler.send(
-    new DeleteScheduleCommand({
-      Name: stopScheduleName,
-      GroupName: "default",
-    }),
-  ).catch(() => undefined);
+  await scheduler
+    .send(
+      new DeleteScheduleCommand({
+        Name: stopScheduleName,
+        GroupName: "default",
+      }),
+    )
+    .catch(() => undefined);
   await scheduler.send(
     new CreateScheduleCommand({
       Name: stopScheduleName,
@@ -168,7 +173,10 @@ async function handleStart(interaction: DiscordInteraction) {
     await createStopSchedule(expiresAt);
     if (options.publicNotify) {
       const webhook = await getSecret(secretNames.notificationWebhookUrl);
-      await postWebhook(webhook, `ASA server start requested by <@${userId ?? "unknown"}>.\nMap: ${options.map}\nTTL: ${options.durationHours}h\nStatus: STARTING`);
+      await postWebhook(
+        webhook,
+        `ASA server start requested by <@${userId ?? "unknown"}>.\nMap: ${options.map}\nTTL: ${options.durationHours}h\nStatus: STARTING`,
+      );
     }
     return message(`ASA start requested.\nMap: ${options.map}\nAuto-stop: ${expiresAt.toISOString()}`, true);
   } catch (error) {
@@ -182,7 +190,13 @@ async function handleStop(interaction: DiscordInteraction) {
   if (!state?.taskArn || (state.status !== "RUNNING" && state.status !== "STARTING")) {
     return message("ASA server is not running.", true);
   }
-  await ecs.send(new StopTaskCommand({ cluster: clusterArn, task: state.taskArn, reason: `USER_REQUEST by ${userIdFromInteraction(interaction) ?? "unknown"}` }));
+  await ecs.send(
+    new StopTaskCommand({
+      cluster: clusterArn,
+      task: state.taskArn,
+      reason: `USER_REQUEST by ${userIdFromInteraction(interaction) ?? "unknown"}`,
+    }),
+  );
   await store.updateServerStatus("STOPPING", { lastStopReason: "USER_REQUEST" });
   await deleteStopSchedule();
   const webhook = await getSecret(secretNames.notificationWebhookUrl);
@@ -213,7 +227,12 @@ async function handleInfo() {
   const state = await store.getServer();
   if (!state || state.status === "STOPPED") return message("ASA server is stopped.", true);
   const passwordLine = allowDiscordPasswordNotification ? `Password: ${await getSecret(secretNames.serverPassword)}` : "Password: hidden";
-  return message([`Server: ${state.sessionName}`, `Map: ${state.mapName}`, `Connect: ${state.connectCommand ?? "not available"}`, passwordLine].join("\n"), true);
+  return message(
+    [`Server: ${state.sessionName}`, `Map: ${state.mapName}`, `Connect: ${state.connectCommand ?? "not available"}`, passwordLine].join(
+      "\n",
+    ),
+    true,
+  );
 }
 
 async function handleBackup() {
@@ -285,7 +304,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
   const allowedUsers = await getJsonArrayParameter(parameterNames.allowedUserIds);
   const allowedRoles = await getJsonArrayParameter(parameterNames.allowedRoleIds);
-  if (!isAuthorized(interaction, allowedUsers, allowedRoles)) return response(200, message("You are not allowed to operate the ASA server.", true));
+  if (!isAuthorized(interaction, allowedUsers, allowedRoles))
+    return response(200, message("You are not allowed to operate the ASA server.", true));
 
   try {
     return response(200, await routeCommand(interaction));

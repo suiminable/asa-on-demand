@@ -1,6 +1,6 @@
-import type { ScheduledEvent } from "aws-lambda";
-import { StopTaskCommand, ECSClient } from "@aws-sdk/client-ecs";
+import { ECSClient, StopTaskCommand } from "@aws-sdk/client-ecs";
 import { DeleteScheduleCommand, SchedulerClient } from "@aws-sdk/client-scheduler";
+import type { ScheduledEvent } from "aws-lambda";
 import { getSecret, requireEnv } from "../../shared/config.js";
 import { postWebhook } from "../../shared/discord.js";
 import { StateStore } from "../../shared/state.js";

@@ -91,4 +91,3 @@ if (!response.ok) {
 }
 
 console.log(JSON.stringify(await response.json(), null, 2));
-

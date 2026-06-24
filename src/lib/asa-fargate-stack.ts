@@ -17,7 +17,7 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
-import { Construct } from "constructs";
+import type { Construct } from "constructs";
 import { parameterNames, secretNames } from "../shared/config.js";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -61,8 +61,6 @@ export class AsaFargateStack extends cdk.Stack {
     const budgetEmail = this.node.tryGetContext("budgetEmail") as string | undefined;
     const hostedZoneId = this.node.tryGetContext("hostedZoneId") as string | undefined;
     const domainName = this.node.tryGetContext("domainName") as string | undefined;
-    const hasRoute53 = Boolean(hostedZoneId && domainName);
-
     const vpc = new ec2.Vpc(this, "AsaVpc", {
       maxAzs: 2,
       natGateways: 0,
@@ -118,7 +116,11 @@ export class AsaFargateStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    const notificationWebhookSecret = secretsmanager.Secret.fromSecretNameV2(this, "NotificationWebhookSecret", secretNames.notificationWebhookUrl);
+    const notificationWebhookSecret = secretsmanager.Secret.fromSecretNameV2(
+      this,
+      "NotificationWebhookSecret",
+      secretNames.notificationWebhookUrl,
+    );
     const serverPasswordSecret = secretsmanager.Secret.fromSecretNameV2(this, "ServerPasswordSecret", secretNames.serverPassword);
     const adminPasswordSecret = secretsmanager.Secret.fromSecretNameV2(this, "ServerAdminPasswordSecret", secretNames.serverAdminPassword);
 
@@ -169,10 +171,13 @@ export class AsaFargateStack extends cdk.Stack {
       },
     });
 
-    imageAsset.repository.grantPull(taskDefinition.executionRole!);
-    notificationWebhookSecret.grantRead(taskDefinition.executionRole!);
-    serverPasswordSecret.grantRead(taskDefinition.executionRole!);
-    adminPasswordSecret.grantRead(taskDefinition.executionRole!);
+    const executionRole = taskDefinition.executionRole;
+    if (!executionRole) throw new Error("Fargate task definition is missing an execution role.");
+
+    imageAsset.repository.grantPull(executionRole);
+    notificationWebhookSecret.grantRead(executionRole);
+    serverPasswordSecret.grantRead(executionRole);
+    adminPasswordSecret.grantRead(executionRole);
 
     taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
@@ -188,11 +193,7 @@ export class AsaFargateStack extends cdk.Stack {
     taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ["s3:GetObject"],
-        resources: [
-          stateBucket.arnForObjects("config/*"),
-          stateBucket.arnForObjects("saves/*"),
-          stateBucket.arnForObjects("runtime/*"),
-        ],
+        resources: [stateBucket.arnForObjects("config/*"), stateBucket.arnForObjects("saves/*"), stateBucket.arnForObjects("runtime/*")],
       }),
     );
     taskDefinition.taskRole.addToPrincipalPolicy(
@@ -336,7 +337,7 @@ export class AsaFargateStack extends cdk.Stack {
     discordInteractions.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["iam:PassRole"],
-        resources: [taskDefinition.taskRole.roleArn, taskDefinition.executionRole!.roleArn],
+        resources: [taskDefinition.taskRole.roleArn, executionRole.roleArn],
       }),
     );
     discordInteractions.addToRolePolicy(
@@ -368,21 +369,25 @@ export class AsaFargateStack extends cdk.Stack {
       fn.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ["ssm:GetParameter", "ssm:GetParameters"],
-          resources: Object.values(parameterNames).map((name) => `arn:${cdk.Aws.PARTITION}:ssm:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:parameter${name}`),
+          resources: Object.values(parameterNames).map(
+            (name) => `arn:${cdk.Aws.PARTITION}:ssm:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:parameter${name}`,
+          ),
         }),
       );
       fn.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ["secretsmanager:GetSecretValue"],
-          resources: Object.values(secretNames).map((name) => `arn:${cdk.Aws.PARTITION}:secretsmanager:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:secret:${name.replace(/^\//, "")}*`),
+          resources: Object.values(secretNames).map(
+            (name) => `arn:${cdk.Aws.PARTITION}:secretsmanager:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:secret:${name.replace(/^\//, "")}*`,
+          ),
         }),
       );
     }
 
-    if (hasRoute53) {
+    if (hostedZoneId && domainName) {
       const zone = route53.HostedZone.fromHostedZoneAttributes(this, "AsaHostedZone", {
-        hostedZoneId: hostedZoneId!,
-        zoneName: domainName!.split(".").slice(1).join("."),
+        hostedZoneId,
+        zoneName: domainName.split(".").slice(1).join("."),
       });
       ecsTaskEvents.addToRolePolicy(
         new iam.PolicyStatement({

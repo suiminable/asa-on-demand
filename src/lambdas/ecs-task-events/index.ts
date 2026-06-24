@@ -1,7 +1,7 @@
-import type { EventBridgeEvent } from "aws-lambda";
 import { DescribeNetworkInterfacesCommand, EC2Client } from "@aws-sdk/client-ec2";
 import { DescribeTasksCommand, ECSClient } from "@aws-sdk/client-ecs";
 import { ChangeResourceRecordSetsCommand, Route53Client } from "@aws-sdk/client-route-53";
+import type { EventBridgeEvent } from "aws-lambda";
 import { monthKey } from "../../shared/budget.js";
 import { getSecret, requireEnv } from "../../shared/config.js";
 import { postWebhook } from "../../shared/discord.js";
@@ -81,10 +81,20 @@ export async function handler(event: EventBridgeEvent<"ECS Task State Change", E
     const publicIp = await resolvePublicIp(detail.taskArn);
     const connectCommand = connectCommandForIp(publicIp, domainName);
     if (publicIp) await updateDns(publicIp);
-    await store.updateServerStatus("RUNNING", { publicIp: publicIp ?? null, connectCommand, taskArn: detail.taskArn, clusterArn: detail.clusterArn });
+    await store.updateServerStatus("RUNNING", {
+      publicIp: publicIp ?? null,
+      connectCommand,
+      taskArn: detail.taskArn,
+      clusterArn: detail.clusterArn,
+    });
     await postWebhook(
       webhook,
-      [`ASA task is running.`, publicIp ? `Public IP: ${publicIp}` : "Public IP: not available yet", `Connect: ${connectCommand ?? "not available yet"}`, "Game server may still be loading. Wait for READY notification."].join("\n"),
+      [
+        `ASA task is running.`,
+        publicIp ? `Public IP: ${publicIp}` : "Public IP: not available yet",
+        `Connect: ${connectCommand ?? "not available yet"}`,
+        "Game server may still be loading. Wait for READY notification.",
+      ].join("\n"),
     );
     return;
   }
@@ -113,4 +123,3 @@ export async function handler(event: EventBridgeEvent<"ECS Task State Change", E
     );
   }
 }
-

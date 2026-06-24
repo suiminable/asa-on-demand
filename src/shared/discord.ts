@@ -26,7 +26,12 @@ export interface DiscordInteraction {
   user?: { id?: string; username?: string };
   data?: {
     name?: string;
-    options?: Array<{ name: string; type: number; value?: string | number | boolean; options?: Array<{ name: string; value?: string | number | boolean }> }>;
+    options?: Array<{
+      name: string;
+      type: number;
+      value?: string | number | boolean;
+      options?: Array<{ name: string; value?: string | number | boolean }>;
+    }>;
   };
 }
 

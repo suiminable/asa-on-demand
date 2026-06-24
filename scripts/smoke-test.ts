@@ -18,4 +18,3 @@ template.resourcePropertiesCountIs("AWS::EC2::SecurityGroupIngress", { IpProtoco
 template.resourcePropertiesCountIs("AWS::EC2::SecurityGroupIngress", { IpProtocol: "udp", FromPort: 27015, ToPort: 27015 }, 1);
 
 console.log("Smoke synth assertions passed.");
-

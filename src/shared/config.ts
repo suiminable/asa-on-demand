@@ -1,5 +1,5 @@
-import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 
 const ssm = new SSMClient({});
 const secrets = new SecretsManagerClient({});
@@ -56,4 +56,3 @@ export function intEnv(name: string, fallback: number): number {
   if (Number.isNaN(parsed)) throw new Error(`Invalid integer environment variable ${name}: ${value}`);
   return parsed;
 }
-

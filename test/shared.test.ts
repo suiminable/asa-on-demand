@@ -31,7 +31,13 @@ describe("Budget helpers", () => {
   });
 
   it("rejects starts that exceed runtime limit", () => {
-    expect(canStart({ budget: { pk: "BUDGET#2026-06", runtimeSeconds: 79 * 3600, estimatedCostJpy: 0, estimatedCostUsd: 0, startCount: 0, updatedAt: "" }, requestedHours: 2, monthlyRuntimeHoursLimit: 80 }).ok).toBe(false);
+    expect(
+      canStart({
+        budget: { pk: "BUDGET#2026-06", runtimeSeconds: 79 * 3600, estimatedCostJpy: 0, estimatedCostUsd: 0, startCount: 0, updatedAt: "" },
+        requestedHours: 2,
+        monthlyRuntimeHoursLimit: 80,
+      }).ok,
+    ).toBe(false);
     expect(canStart({ budget: undefined, requestedHours: 4, monthlyRuntimeHoursLimit: 80 }).ok).toBe(true);
   });
 });
@@ -56,4 +62,3 @@ describe("ECS helpers", () => {
     expect(connectCommandForIp(undefined)).toBeNull();
   });
 });
-

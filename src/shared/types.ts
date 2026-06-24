@@ -27,4 +27,3 @@ export interface BudgetState {
   startCount: number;
   updatedAt: string;
 }
-

@@ -6,7 +6,11 @@
   "packageManager": "pnpm@10.17.0",
   "scripts": {
     "build": "tsc --noEmit",
+    "check": "biome check .",
     "cdk": "cdk",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
     "synth": "cdk synth",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -17,9 +21,9 @@
     "@aws-sdk/client-dynamodb": "^3.614.0",
     "@aws-sdk/client-ec2": "^3.614.0",
     "@aws-sdk/client-ecs": "^3.614.0",
-    "@aws-sdk/client-scheduler": "^3.614.0",
     "@aws-sdk/client-route-53": "^3.614.0",
     "@aws-sdk/client-s3": "^3.614.0",
+    "@aws-sdk/client-scheduler": "^3.614.0",
     "@aws-sdk/client-secrets-manager": "^3.614.0",
     "@aws-sdk/client-ssm": "^3.614.0",
     "@aws-sdk/lib-dynamodb": "^3.614.0",
@@ -28,6 +32,7 @@
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.0",
     "@types/aws-lambda": "^8.10.141",
     "@types/node": "^22.5.0",
     "aws-cdk": "^2.151.0",

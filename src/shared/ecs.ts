@@ -13,4 +13,3 @@ export function connectCommandForIp(publicIp: string | undefined, domainName?: s
   const host = domainName || publicIp;
   return host ? `open ${host}:7777` : null;
 }
-

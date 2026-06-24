@@ -11,4 +11,3 @@ new AsaFargateStack(app, "AsaFargateStack", {
     region,
   },
 });
-

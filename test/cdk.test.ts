@@ -53,4 +53,3 @@ describe("AsaFargateStack", () => {
     expect(() => template.resourceCountIs("AWS::ECS::Service", 0)).not.toThrow();
   });
 });
-
