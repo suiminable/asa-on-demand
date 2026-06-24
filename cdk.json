@@ -1,0 +1,17 @@
+{
+  "app": "pnpm exec tsx src/bin/app.ts",
+  "context": {
+    "region": "ap-northeast-1",
+    "asaCpu": 2048,
+    "asaMemoryMiB": 12288,
+    "asaEphemeralStorageGiB": 100,
+    "asaStopTimeoutSeconds": 120,
+    "defaultSessionHours": 4,
+    "maxSessionHours": 8,
+    "monthlyBudgetJpy": 1500,
+    "monthlyRuntimeHoursLimit": 80,
+    "enableOnDemandFallback": false,
+    "allowDiscordPasswordNotification": false
+  }
+}
+
