@@ -4,23 +4,47 @@ import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 const ssm = new SSMClient({});
 const secrets = new SecretsManagerClient({});
 
-export const parameterNames = {
-  discordApplicationId: "/asa/discord/application-id",
-  discordPublicKey: "/asa/discord/public-key",
-  discordGuildId: "/asa/discord/guild-id",
-  allowedRoleIds: "/asa/discord/allowed-role-ids",
-  allowedUserIds: "/asa/discord/allowed-user-ids",
-  sessionName: "/asa/server/session-name",
-  defaultMap: "/asa/server/default-map",
-  maxPlayers: "/asa/server/max-players",
+const parameterSuffixes = {
+  discordApplicationId: "/discord/application-id",
+  discordPublicKey: "/discord/public-key",
+  discordGuildId: "/discord/guild-id",
+  allowedRoleIds: "/discord/allowed-role-ids",
+  allowedUserIds: "/discord/allowed-user-ids",
+  sessionName: "/server/session-name",
+  defaultMap: "/server/default-map",
+  maxPlayers: "/server/max-players",
 } as const;
 
-export const secretNames = {
-  discordBotToken: "/asa/discord/bot-token",
-  notificationWebhookUrl: "/asa/discord/notification-webhook-url",
-  serverPassword: "/asa/server/password",
-  serverAdminPassword: "/asa/server/admin-password",
+const secretSuffixes = {
+  discordBotToken: "/discord/bot-token",
+  notificationWebhookUrl: "/discord/notification-webhook-url",
+  serverPassword: "/server/password",
+  serverAdminPassword: "/server/admin-password",
 } as const;
+
+export type ParameterNames = Record<keyof typeof parameterSuffixes, string>;
+export type SecretNames = Record<keyof typeof secretSuffixes, string>;
+
+export function normalizeConfigPrefix(prefix = "/asa"): string {
+  const trimmed = prefix.trim().replace(/^\/+|\/+$/g, "");
+  return `/${trimmed || "asa"}`;
+}
+
+function namesFor<T extends Record<string, string>>(prefix: string | undefined, suffixes: T): Record<keyof T, string> {
+  const normalized = normalizeConfigPrefix(prefix);
+  return Object.fromEntries(Object.entries(suffixes).map(([key, suffix]) => [key, `${normalized}${suffix}`])) as Record<keyof T, string>;
+}
+
+export function parameterNamesFor(prefix?: string): ParameterNames {
+  return namesFor(prefix, parameterSuffixes);
+}
+
+export function secretNamesFor(prefix?: string): SecretNames {
+  return namesFor(prefix, secretSuffixes);
+}
+
+export const parameterNames = parameterNamesFor();
+export const secretNames = secretNamesFor();
 
 export async function getParameter(name: string, fallback?: string): Promise<string> {
   try {

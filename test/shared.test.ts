@@ -1,6 +1,7 @@
 import nacl from "tweetnacl";
 import { describe, expect, it } from "vitest";
 import { canStart, hours, monthKey } from "../src/shared/budget.js";
+import { normalizeConfigPrefix, parameterNamesFor, secretNamesFor } from "../src/shared/config.js";
 import { isAuthorized, verifyDiscordSignature } from "../src/shared/discord.js";
 import { connectCommandForIp, eniIdFromTask } from "../src/shared/ecs.js";
 
@@ -60,5 +61,13 @@ describe("ECS helpers", () => {
     expect(connectCommandForIp("203.0.113.10")).toBe("open 203.0.113.10:7777");
     expect(connectCommandForIp("203.0.113.10", "ark.example.com")).toBe("open ark.example.com:7777");
     expect(connectCommandForIp(undefined)).toBeNull();
+  });
+});
+
+describe("Config helpers", () => {
+  it("normalizes scoped SSM and Secrets Manager prefixes", () => {
+    expect(normalizeConfigPrefix(" /asa/maps/the-island/ ")).toBe("/asa/maps/the-island");
+    expect(parameterNamesFor("/asa/maps/the-island").defaultMap).toBe("/asa/maps/the-island/server/default-map");
+    expect(secretNamesFor("/asa/maps/the-island").serverPassword).toBe("/asa/maps/the-island/server/password");
   });
 });

@@ -18,7 +18,7 @@ import * as route53 from "aws-cdk-lib/aws-route53";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import type { Construct } from "constructs";
-import { parameterNames, secretNames } from "../shared/config.js";
+import { normalizeConfigPrefix, parameterNamesFor, secretNamesFor } from "../shared/config.js";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(dirname, "../..");
@@ -42,11 +42,53 @@ function booleanContext(scope: Construct, name: string, defaultValue: boolean): 
   return value === true || value === "true";
 }
 
+function stringContext(scope: Construct, name: string, defaultValue = ""): string {
+  const value = scope.node.tryGetContext(name);
+  if (value === undefined || value === null) return defaultValue;
+  return String(value);
+}
+
+function normalizeS3Prefix(prefix: string): string {
+  const trimmed = prefix.trim().replace(/^\/+|\/+$/g, "");
+  if (!trimmed) return "";
+  if (!/^[A-Za-z0-9_.\/-]+$/.test(trimmed)) {
+    throw new Error("Context resourcePrefix must contain only letters, numbers, slash, dot, underscore, or hyphen.");
+  }
+  return `${trimmed}/`;
+}
+
+function normalizeNameSegment(value: string, fallback = "default"): string {
+  const normalized = value
+    .trim()
+    .replace(/^\/+|\/+$/g, "")
+    .replace(/[^A-Za-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+  return normalized || fallback;
+}
+
+function s3Key(scopePrefix: string, key: string): string {
+  return `${scopePrefix}${key}`;
+}
+
+function s3Pattern(scopePrefix: string, pattern: string): string {
+  return `${scopePrefix}${pattern}`;
+}
+
+function prefixedLogGroupName(resourceNameSegment: string, suffix: string): string {
+  return resourceNameSegment ? `/asa/${resourceNameSegment}/${suffix}` : `/asa/${suffix}`;
+}
+
 export class AsaFargateStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
     const region = this.node.tryGetContext("region") ?? cdk.Stack.of(this).region;
+    const resourcePrefix = normalizeS3Prefix(stringContext(this, "resourcePrefix"));
+    const resourceNameSegment = resourcePrefix ? normalizeNameSegment(resourcePrefix) : "";
+    const configPrefix = normalizeConfigPrefix(resourcePrefix ? `/asa/${resourcePrefix}` : "/asa");
+    const parameterNames = parameterNamesFor(configPrefix);
+    const secretNames = secretNamesFor(configPrefix);
     const cpu = numberContext(this, { name: "asaCpu", defaultValue: 2048 });
     const memoryMiB = numberContext(this, { name: "asaMemoryMiB", defaultValue: 12288 });
     const ephemeralStorageGiB = numberContext(this, { name: "asaEphemeralStorageGiB", defaultValue: 100 });
@@ -90,8 +132,8 @@ export class AsaFargateStack extends cdk.Stack {
       versioned: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       lifecycleRules: [
-        { prefix: "backups/", expiration: cdk.Duration.days(30) },
-        { prefix: "logs/", expiration: cdk.Duration.days(14) },
+        { prefix: s3Key(resourcePrefix, "backups/"), expiration: cdk.Duration.days(30) },
+        { prefix: s3Key(resourcePrefix, "logs/"), expiration: cdk.Duration.days(14) },
       ],
     });
 
@@ -111,7 +153,7 @@ export class AsaFargateStack extends cdk.Stack {
     });
 
     const ecsLogGroup = new logs.LogGroup(this, "AsaEcsLogGroup", {
-      logGroupName: "/asa/ecs/server",
+      logGroupName: prefixedLogGroupName(resourceNameSegment, "ecs/server"),
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
@@ -150,8 +192,10 @@ export class AsaFargateStack extends cdk.Stack {
       environment: {
         AWS_REGION: region,
         S3_BUCKET: stateBucket.bucketName,
-        S3_SAVE_KEY: "saves/current.tar.zst",
-        S3_BACKUP_PREFIX: "backups/",
+        S3_SAVE_KEY: s3Key(resourcePrefix, "saves/current.tar.zst"),
+        S3_BACKUP_PREFIX: s3Key(resourcePrefix, "backups/"),
+        S3_CONFIG_PREFIX: s3Key(resourcePrefix, "config/"),
+        S3_RUNTIME_PREFIX: s3Key(resourcePrefix, "runtime/"),
         ASA_APP_ID: "2430930",
         ASA_INSTALL_DIR: "/asa/server",
         ASA_MAP: "TheIsland_WP",
@@ -162,7 +206,7 @@ export class AsaFargateStack extends cdk.Stack {
         ASA_RCON_PORT: "27020",
         ASA_DISABLE_BATTLEYE: "true",
         AUTO_BACKUP_INTERVAL_SECONDS: "600",
-        BACKUP_REQUEST_KEY: "runtime/backup-request.json",
+        BACKUP_REQUEST_KEY: s3Key(resourcePrefix, "runtime/backup-request.json"),
       },
       secrets: {
         DISCORD_WEBHOOK_URL: ecs.Secret.fromSecretsManager(notificationWebhookSecret),
@@ -185,7 +229,12 @@ export class AsaFargateStack extends cdk.Stack {
         resources: [stateBucket.bucketArn],
         conditions: {
           StringLike: {
-            "s3:prefix": ["config/*", "saves/*", "runtime/*", "backups/*"],
+            "s3:prefix": [
+              s3Pattern(resourcePrefix, "config/*"),
+              s3Pattern(resourcePrefix, "saves/*"),
+              s3Pattern(resourcePrefix, "runtime/*"),
+              s3Pattern(resourcePrefix, "backups/*"),
+            ],
           },
         },
       }),
@@ -193,17 +242,21 @@ export class AsaFargateStack extends cdk.Stack {
     taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ["s3:GetObject"],
-        resources: [stateBucket.arnForObjects("config/*"), stateBucket.arnForObjects("saves/*"), stateBucket.arnForObjects("runtime/*")],
+        resources: [
+          stateBucket.arnForObjects(s3Pattern(resourcePrefix, "config/*")),
+          stateBucket.arnForObjects(s3Pattern(resourcePrefix, "saves/*")),
+          stateBucket.arnForObjects(s3Pattern(resourcePrefix, "runtime/*")),
+        ],
       }),
     );
     taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ["s3:PutObject"],
         resources: [
-          stateBucket.arnForObjects("saves/*"),
-          stateBucket.arnForObjects("backups/*"),
-          stateBucket.arnForObjects("runtime/*"),
-          stateBucket.arnForObjects("logs/*"),
+          stateBucket.arnForObjects(s3Pattern(resourcePrefix, "saves/*")),
+          stateBucket.arnForObjects(s3Pattern(resourcePrefix, "backups/*")),
+          stateBucket.arnForObjects(s3Pattern(resourcePrefix, "runtime/*")),
+          stateBucket.arnForObjects(s3Pattern(resourcePrefix, "logs/*")),
         ],
       }),
     );
@@ -234,7 +287,9 @@ export class AsaFargateStack extends cdk.Stack {
       SUBNET_IDS: vpc.publicSubnets.map((subnet) => subnet.subnetId).join(","),
       SECURITY_GROUP_ID: serverSecurityGroup.securityGroupId,
       S3_BUCKET: stateBucket.bucketName,
-      STOP_SCHEDULE_NAME: "asa-auto-stop",
+      S3_RUNTIME_PREFIX: s3Key(resourcePrefix, "runtime/"),
+      CONFIG_PREFIX: configPrefix,
+      STOP_SCHEDULE_NAME: resourcePrefix ? `asa-${resourceNameSegment}-auto-stop` : "asa-auto-stop",
       STOP_SCHEDULER_ROLE_ARN: stopSchedulerRole.roleArn,
       DEFAULT_SESSION_HOURS: String(defaultSessionHours),
       MAX_SESSION_HOURS: String(maxSessionHours),
@@ -246,7 +301,7 @@ export class AsaFargateStack extends cdk.Stack {
     };
 
     const discordInteractionsLogGroup = new logs.LogGroup(this, "DiscordInteractionsLogGroup", {
-      logGroupName: "/asa/lambda/discord-interactions",
+      logGroupName: prefixedLogGroupName(resourceNameSegment, "lambda/discord-interactions"),
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
@@ -258,7 +313,7 @@ export class AsaFargateStack extends cdk.Stack {
     });
 
     const ecsTaskEventsLogGroup = new logs.LogGroup(this, "EcsTaskEventsLogGroup", {
-      logGroupName: "/asa/lambda/ecs-task-events",
+      logGroupName: prefixedLogGroupName(resourceNameSegment, "lambda/ecs-task-events"),
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
@@ -274,7 +329,7 @@ export class AsaFargateStack extends cdk.Stack {
     });
 
     const stopServerLogGroup = new logs.LogGroup(this, "StopServerLogGroup", {
-      logGroupName: "/asa/lambda/stop-server",
+      logGroupName: prefixedLogGroupName(resourceNameSegment, "lambda/stop-server"),
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
@@ -311,8 +366,8 @@ export class AsaFargateStack extends cdk.Stack {
     stateTable.grantReadWriteData(discordInteractions);
     stateTable.grantReadWriteData(ecsTaskEvents);
     stateTable.grantReadWriteData(stopServer);
-    stateBucket.grantPut(discordInteractions, "runtime/*");
-    stateBucket.grantRead(discordInteractions, "runtime/*");
+    stateBucket.grantPut(discordInteractions, s3Pattern(resourcePrefix, "runtime/*"));
+    stateBucket.grantRead(discordInteractions, s3Pattern(resourcePrefix, "runtime/*"));
 
     for (const fn of [discordInteractions, stopServer]) {
       fn.addToRolePolicy(
@@ -343,7 +398,9 @@ export class AsaFargateStack extends cdk.Stack {
     discordInteractions.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["scheduler:CreateSchedule", "scheduler:DeleteSchedule", "scheduler:GetSchedule"],
-        resources: [`arn:${cdk.Aws.PARTITION}:scheduler:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:schedule/default/asa-auto-stop`],
+        resources: [
+          `arn:${cdk.Aws.PARTITION}:scheduler:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:schedule/default/${commonEnvironment.STOP_SCHEDULE_NAME}`,
+        ],
       }),
     );
     discordInteractions.addToRolePolicy(
@@ -355,7 +412,9 @@ export class AsaFargateStack extends cdk.Stack {
     stopServer.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["scheduler:DeleteSchedule", "scheduler:GetSchedule"],
-        resources: [`arn:${cdk.Aws.PARTITION}:scheduler:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:schedule/default/asa-auto-stop`],
+        resources: [
+          `arn:${cdk.Aws.PARTITION}:scheduler:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:schedule/default/${commonEnvironment.STOP_SCHEDULE_NAME}`,
+        ],
       }),
     );
     ecsTaskEvents.addToRolePolicy(
@@ -378,7 +437,7 @@ export class AsaFargateStack extends cdk.Stack {
         new iam.PolicyStatement({
           actions: ["secretsmanager:GetSecretValue"],
           resources: Object.values(secretNames).map(
-            (name) => `arn:${cdk.Aws.PARTITION}:secretsmanager:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:secret:${name.replace(/^\//, "")}*`,
+            (name) => `arn:${cdk.Aws.PARTITION}:secretsmanager:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:secret:${name}*`,
           ),
         }),
       );
@@ -401,7 +460,7 @@ export class AsaFargateStack extends cdk.Stack {
       if (!budgetEmail) throw new Error("budgetEmail context is required when enableAwsBudget=true.");
       new budgets.CfnBudget(this, "AsaMonthlyBudget", {
         budget: {
-          budgetName: "asa-on-demand-monthly-budget",
+          budgetName: resourcePrefix ? `asa-on-demand-${resourceNameSegment}-monthly-budget` : "asa-on-demand-monthly-budget",
           budgetType: "COST",
           timeUnit: "MONTHLY",
           budgetLimit: {

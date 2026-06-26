@@ -3,7 +3,15 @@ import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CreateScheduleCommand, DeleteScheduleCommand, SchedulerClient } from "@aws-sdk/client-scheduler";
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from "aws-lambda";
 import { canStart, hours, monthKey } from "../../shared/budget.js";
-import { getJsonArrayParameter, getParameter, getSecret, intEnv, parameterNames, requireEnv, secretNames } from "../../shared/config.js";
+import {
+  getJsonArrayParameter,
+  getParameter,
+  getSecret,
+  intEnv,
+  parameterNamesFor,
+  requireEnv,
+  secretNamesFor,
+} from "../../shared/config.js";
 import {
   type DiscordInteraction,
   InteractionResponseType,
@@ -31,6 +39,9 @@ const securityGroupId = requireEnv("SECURITY_GROUP_ID");
 const stopScheduleName = requireEnv("STOP_SCHEDULE_NAME");
 const stopSchedulerRoleArn = requireEnv("STOP_SCHEDULER_ROLE_ARN");
 const bucketName = requireEnv("S3_BUCKET");
+const s3RuntimePrefix = process.env.S3_RUNTIME_PREFIX ?? "runtime/";
+const parameterNames = parameterNamesFor(process.env.CONFIG_PREFIX);
+const secretNames = secretNamesFor(process.env.CONFIG_PREFIX);
 const maxSessionHours = intEnv("MAX_SESSION_HOURS", 8);
 const defaultSessionHours = intEnv("DEFAULT_SESSION_HOURS", 4);
 const monthlyRuntimeHoursLimit = intEnv("MONTHLY_RUNTIME_HOURS_LIMIT", 80);
@@ -95,7 +106,13 @@ async function deleteStopSchedule(): Promise<void> {
 async function handleStart(interaction: DiscordInteraction) {
   const now = new Date();
   const options = startOptions(interaction);
+  const defaultMap = await getParameter(parameterNames.defaultMap, "TheIsland_WP");
+  if (!optionValue<string>(interaction, "map")) options.map = defaultMap;
   const sessionName = await getParameter(parameterNames.sessionName, "private-asa");
+  const configuredMaxPlayers = Number(await getParameter(parameterNames.maxPlayers, "4"));
+  if (!optionValue<number>(interaction, "max_players") && Number.isFinite(configuredMaxPlayers)) {
+    options.maxPlayers = Math.min(Math.max(configuredMaxPlayers, 1), 8);
+  }
   if (!/^[A-Za-z0-9_.-]{1,64}$/.test(sessionName)) {
     return message("Configured session name is invalid. Use only A-Z, a-z, 0-9, underscore, dot, and hyphen.", true);
   }
@@ -241,7 +258,7 @@ async function handleBackup() {
     await s3.send(
       new PutObjectCommand({
         Bucket: bucketName,
-        Key: "runtime/backup-request.json",
+        Key: `${s3RuntimePrefix}backup-request.json`,
         Body: JSON.stringify({ requestedAt: new Date().toISOString() }),
         ContentType: "application/json",
       }),

@@ -6,6 +6,7 @@ set -euo pipefail
 : "${S3_BACKUP_PREFIX:?S3_BACKUP_PREFIX is required}"
 : "${ASA_INSTALL_DIR:?ASA_INSTALL_DIR is required}"
 
+S3_RUNTIME_PREFIX="${S3_RUNTIME_PREFIX:-runtime/}"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 dated_path="$(date -u +%Y/%m/%d)/${timestamp}.tar.zst"
 archive="/asa/tmp/current-${timestamp}.tar.zst"
@@ -25,6 +26,5 @@ tar --zstd -cf "${archive}" -C "${ASA_INSTALL_DIR}/ShooterGame" Saved
 aws s3 cp "${archive}" "s3://${S3_BUCKET}/${S3_SAVE_KEY}"
 aws s3 cp "${archive}" "s3://${S3_BUCKET}/${S3_BACKUP_PREFIX}${dated_path}"
 jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg key "${S3_BACKUP_PREFIX}${dated_path}" '{lastBackupAt: $at, key: $key}' \
-  | aws s3 cp - "s3://${S3_BUCKET}/runtime/last-backup.json" --content-type application/json
+  | aws s3 cp - "s3://${S3_BUCKET}/${S3_RUNTIME_PREFIX}last-backup.json" --content-type application/json
 rm -f "${archive}"
-
