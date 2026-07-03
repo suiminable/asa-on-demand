@@ -48,12 +48,17 @@ The stack name becomes `AsaFargateStack-maps-the-island`, the auto-stop schedule
 
 ## Secrets And Parameters
 
-Use [scripts/put-secrets.example.sh](./scripts/put-secrets.example.sh) as a template. Do not commit real secrets.
+Use [scripts/put-secrets.example.sh](./scripts/put-secrets.example.sh) as a template. Keep real secrets and local server configuration under the gitignored `local/` directory:
+
+```bash
+mkdir -p local
+cp scripts/put-secrets.example.sh local/put-secrets.sh
+```
 
 For a prefixed map environment, store SSM parameters and Secrets Manager secrets under the matching resource prefix:
 
 ```bash
-RESOURCE_PREFIX=maps/the-island ./scripts/put-secrets.example.sh --profile my-aws-profile
+RESOURCE_PREFIX=maps/the-island ./local/put-secrets.sh --profile my-aws-profile
 pnpm exec cdk deploy \
   -c resourcePrefix=maps/the-island
 ```
