@@ -44,6 +44,18 @@ describe("AsaFargateStack", () => {
       ContainerDefinitions: Match.arrayWith([
         Match.objectLike({
           StopTimeout: 120,
+          Environment: Match.arrayWith([{ Name: "ASA_UPDATE_ON_START", Value: "false" }]),
+        }),
+      ]),
+    });
+  });
+
+  it("can explicitly update the bundled server at task startup", () => {
+    const template = synthTemplate({ asaUpdateOnStart: true });
+    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          Environment: Match.arrayWith([{ Name: "ASA_UPDATE_ON_START", Value: "true" }]),
         }),
       ]),
     });

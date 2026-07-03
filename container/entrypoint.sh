@@ -68,8 +68,12 @@ shutdown() {
 
 trap shutdown SIGTERM SIGINT
 
-echo "Updating ASA dedicated server with SteamCMD..."
-steamcmd +force_install_dir "${ASA_INSTALL_DIR}" +login anonymous +app_update "${ASA_APP_ID}" validate +quit
+if [[ "${ASA_UPDATE_ON_START:-false}" == "true" ]]; then
+  echo "Updating ASA dedicated server with SteamCMD..."
+  steamcmd +force_install_dir "${ASA_INSTALL_DIR}" +login anonymous +app_update "${ASA_APP_ID}" validate +quit
+else
+  echo "Using ASA dedicated server bundled in the container image."
+fi
 
 /asa/scripts/restore.sh
 
@@ -79,13 +83,24 @@ if [[ ! -f "${server_exe}" ]]; then
   exit 1
 fi
 
+# Steam currently ships this DLL with ASA, but it crashes when loaded through Proton.
+rm -f "${ASA_INSTALL_DIR}/ShooterGame/Binaries/Win64/steamclient64.dll"
+
 launch_arg="${ASA_MAP}?listen?SessionName=${ASA_SESSION_NAME}?ServerPassword=${ASA_SERVER_PASSWORD}?ServerAdminPassword=${ASA_ADMIN_PASSWORD}?MaxPlayers=${ASA_MAX_PLAYERS}?Port=${ASA_PORT}?QueryPort=${ASA_QUERY_PORT}?RCONEnabled=True?RCONPort=${ASA_RCON_PORT}"
 extra_args=(-log)
 if [[ "${ASA_DISABLE_BATTLEYE:-true}" == "true" ]]; then
   extra_args+=(-NoBattlEye)
 fi
 
-if command -v umu-run >/dev/null 2>&1; then
+if [[ -x "${PROTONPATH:-}/proton" ]]; then
+  export STEAM_COMPAT_CLIENT_INSTALL_PATH="${STEAM_COMPAT_CLIENT_INSTALL_PATH:-/home/asa/.local/share/Steam}"
+  export STEAM_COMPAT_DATA_PATH="${STEAM_COMPAT_DATA_PATH:-${WINEPREFIX}}"
+  export STEAM_COMPAT_INSTALL_PATH="${STEAM_COMPAT_INSTALL_PATH:-${ASA_INSTALL_DIR}}"
+  export SteamAppId="${ASA_APP_ID}"
+  export SteamGameId="${ASA_APP_ID}"
+  mkdir -p "${STEAM_COMPAT_CLIENT_INSTALL_PATH}" "${STEAM_COMPAT_DATA_PATH}"
+  launcher=("${PROTONPATH}/proton" run "${server_exe}")
+elif command -v umu-run >/dev/null 2>&1; then
   launcher=(umu-run "${server_exe}")
 elif command -v proton >/dev/null 2>&1; then
   launcher=(proton run "${server_exe}")
@@ -137,4 +152,3 @@ wait "${asa_pid}"
 exit_code="$?"
 stop_background_loops
 exit "${exit_code}"
-

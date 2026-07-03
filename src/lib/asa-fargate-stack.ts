@@ -99,6 +99,8 @@ export class AsaFargateStack extends cdk.Stack {
     const monthlyRuntimeHoursLimit = numberContext(this, { name: "monthlyRuntimeHoursLimit", defaultValue: 80 });
     const enableOnDemandFallback = booleanContext(this, "enableOnDemandFallback", false);
     const allowDiscordPasswordNotification = booleanContext(this, "allowDiscordPasswordNotification", false);
+    const asaBuildId = stringContext(this, "asaBuildId") || "initial";
+    const asaUpdateOnStart = booleanContext(this, "asaUpdateOnStart", false);
     const enableAwsBudget = booleanContext(this, "enableAwsBudget", false);
     const budgetEmail = this.node.tryGetContext("budgetEmail") as string | undefined;
     const hostedZoneId = this.node.tryGetContext("hostedZoneId") as string | undefined;
@@ -150,6 +152,7 @@ export class AsaFargateStack extends cdk.Stack {
 
     const imageAsset = new ecrAssets.DockerImageAsset(this, "AsaServerImage", {
       directory: path.join(rootDir, "container"),
+      buildArgs: { ASA_BUILD_ID: asaBuildId },
     });
 
     const ecsLogGroup = new logs.LogGroup(this, "AsaEcsLogGroup", {
@@ -205,6 +208,7 @@ export class AsaFargateStack extends cdk.Stack {
         ASA_QUERY_PORT: "27015",
         ASA_RCON_PORT: "27020",
         ASA_DISABLE_BATTLEYE: "true",
+        ASA_UPDATE_ON_START: String(asaUpdateOnStart),
         AUTO_BACKUP_INTERVAL_SECONDS: "600",
         BACKUP_REQUEST_KEY: s3Key(resourcePrefix, "runtime/backup-request.json"),
       },

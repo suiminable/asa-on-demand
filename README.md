@@ -53,7 +53,7 @@ Use [scripts/put-secrets.example.sh](./scripts/put-secrets.example.sh) as a temp
 For a prefixed map environment, store SSM parameters and Secrets Manager secrets under the matching resource prefix:
 
 ```bash
-RESOURCE_PREFIX=maps/the-island ./scripts/put-secrets.example.sh
+RESOURCE_PREFIX=maps/the-island ./scripts/put-secrets.example.sh --profile my-aws-profile
 pnpm exec cdk deploy \
   -c resourcePrefix=maps/the-island
 ```
@@ -107,6 +107,7 @@ pnpm run smoke
 - ECS tasks are started via `RunTask`; no ECS Service is created.
 - The VPC has public subnets only and no NAT Gateway.
 - Fargate Spot is the default capacity provider strategy. On-demand fallback is disabled unless `-c enableOnDemandFallback=true` is provided.
-- The container uses `umu-run` when available, then falls back to `proton`.
-- ASA itself is downloaded at task startup by SteamCMD and is not baked into the image.
+- ASA and UMU-Proton are installed in the Docker image during `cdk deploy`. Tasks use the bundled files and start Proton directly.
+- To pick up an ASA update, deploy with a new build marker, for example `-c asaBuildId=2026-07-04`. This invalidates the Docker build cache and runs SteamCMD while rebuilding the image.
+- `-c asaUpdateOnStart=true` enables a SteamCMD update on every task start for emergency use. It is disabled by default.
 - The Discord start/stop commands return a direct interaction response after the AWS operation is accepted; readiness and lifecycle updates go to the configured Discord webhook.
