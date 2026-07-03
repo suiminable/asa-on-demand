@@ -107,7 +107,6 @@ Inbound:
 |---|---:|---|---|
 | UDP | 7777 | `0.0.0.0/0` | ASA game port |
 | UDP | 7778 | `0.0.0.0/0` | ASA raw/socket adjacent port |
-| UDP | 27015 | `0.0.0.0/0` | Steam query port |
 
 Outbound:
 
@@ -743,7 +742,6 @@ ASA_MAX_PLAYERS=4
 ASA_SERVER_PASSWORD=<secret>
 ASA_ADMIN_PASSWORD=<secret>
 ASA_PORT=7777
-ASA_QUERY_PORT=27015
 ASA_RCON_PORT=27020
 ASA_DISABLE_BATTLEYE=true
 DISCORD_WEBHOOK_URL=<secret>
@@ -791,7 +789,7 @@ steamcmd \
 
 ```bash
 ArkAscendedServer.exe \
-  "${ASA_MAP}?listen?SessionName=${ASA_SESSION_NAME}?ServerPassword=${ASA_SERVER_PASSWORD}?ServerAdminPassword=${ASA_ADMIN_PASSWORD}?MaxPlayers=${ASA_MAX_PLAYERS}?Port=${ASA_PORT}?QueryPort=${ASA_QUERY_PORT}" \
+  "${ASA_MAP}?listen?SessionName=${ASA_SESSION_NAME}?ServerPassword=${ASA_SERVER_PASSWORD}?ServerAdminPassword=${ASA_ADMIN_PASSWORD}?MaxPlayers=${ASA_MAX_PLAYERS}?Port=${ASA_PORT}?RCONEnabled=True?RCONPort=${ASA_RCON_PORT}" \
   -log
 ```
 
@@ -801,16 +799,8 @@ ArkAscendedServer.exe \
 
 ## 6.5 Ready判定
 
-以下のいずれかで READY とみなす。
-
-優先順位:
-
-1. RCON 接続が成功する。
-2. UDP query port が応答する。
-3. server log に ready 相当の行が出る。
-
-初期実装では RCON 成功を第一候補にする。
-RCON が安定しない場合は log pattern に fallback する。
+localhost の RCON TCP port への接続が成功したら READY とみなす。
+RCON が安定しない場合は server log pattern への fallback を検討する。
 
 READY になったら Discord webhook に投稿する。
 
@@ -1249,7 +1239,7 @@ Retention:
 - EC2 Instance / AutoScalingGroup が作られていない。
 - NAT Gateway が作られていない。
 - ALB / NLB が作られていない。
-- Security Group inbound が UDP 7777, 7778, 27015 のみ。
+- Security Group inbound が UDP 7777, 7778 のみ。
 - TaskDefinition が Fargate Linux x86_64。
 - Ephemeral storage が context 通り。
 - stopTimeout が 120 秒。

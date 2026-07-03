@@ -27,7 +27,7 @@ describe("AsaFargateStack", () => {
     const template = synthTemplate();
     template.hasResourceProperties("AWS::EC2::SecurityGroupIngress", { IpProtocol: "udp", FromPort: 7777, ToPort: 7777 });
     template.hasResourceProperties("AWS::EC2::SecurityGroupIngress", { IpProtocol: "udp", FromPort: 7778, ToPort: 7778 });
-    template.hasResourceProperties("AWS::EC2::SecurityGroupIngress", { IpProtocol: "udp", FromPort: 27015, ToPort: 27015 });
+    template.resourceCountIs("AWS::EC2::SecurityGroupIngress", 2);
   });
 
   it("configures Fargate Linux task storage and stop timeout", () => {

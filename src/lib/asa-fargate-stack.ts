@@ -125,7 +125,6 @@ export class AsaFargateStack extends cdk.Stack {
     });
     serverSecurityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.udp(7777), "ASA game port");
     serverSecurityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.udp(7778), "ASA adjacent UDP port");
-    serverSecurityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.udp(27015), "Steam query port");
 
     const stateBucket = new s3.Bucket(this, "AsaStateBucket", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -190,7 +189,6 @@ export class AsaFargateStack extends cdk.Stack {
       portMappings: [
         { containerPort: 7777, protocol: ecs.Protocol.UDP },
         { containerPort: 7778, protocol: ecs.Protocol.UDP },
-        { containerPort: 27015, protocol: ecs.Protocol.UDP },
       ],
       environment: {
         AWS_REGION: region,
@@ -205,7 +203,6 @@ export class AsaFargateStack extends cdk.Stack {
         ASA_SESSION_NAME: "private-asa",
         ASA_MAX_PLAYERS: "4",
         ASA_PORT: "7777",
-        ASA_QUERY_PORT: "27015",
         ASA_RCON_PORT: "27020",
         ASA_DISABLE_BATTLEYE: "true",
         ASA_UPDATE_ON_START: String(asaUpdateOnStart),

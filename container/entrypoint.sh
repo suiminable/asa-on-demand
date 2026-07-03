@@ -14,7 +14,6 @@ required=(
   ASA_SERVER_PASSWORD
   ASA_ADMIN_PASSWORD
   ASA_PORT
-  ASA_QUERY_PORT
   ASA_RCON_PORT
 )
 
@@ -86,7 +85,7 @@ fi
 # Steam currently ships this DLL with ASA, but it crashes when loaded through Proton.
 rm -f "${ASA_INSTALL_DIR}/ShooterGame/Binaries/Win64/steamclient64.dll"
 
-launch_arg="${ASA_MAP}?listen?SessionName=${ASA_SESSION_NAME}?ServerPassword=${ASA_SERVER_PASSWORD}?ServerAdminPassword=${ASA_ADMIN_PASSWORD}?MaxPlayers=${ASA_MAX_PLAYERS}?Port=${ASA_PORT}?QueryPort=${ASA_QUERY_PORT}?RCONEnabled=True?RCONPort=${ASA_RCON_PORT}"
+launch_arg="${ASA_MAP}?listen?SessionName=${ASA_SESSION_NAME}?ServerPassword=${ASA_SERVER_PASSWORD}?ServerAdminPassword=${ASA_ADMIN_PASSWORD}?MaxPlayers=${ASA_MAX_PLAYERS}?Port=${ASA_PORT}?RCONEnabled=True?RCONPort=${ASA_RCON_PORT}"
 extra_args=(-log)
 if [[ "${ASA_DISABLE_BATTLEYE:-true}" == "true" ]]; then
   extra_args+=(-NoBattlEye)
@@ -139,7 +138,7 @@ request_loop_pid="$!"
 
 (
   for _ in $(seq 1 120); do
-    if nc -z -u -w1 127.0.0.1 "${ASA_QUERY_PORT}" >/dev/null 2>&1; then
+    if nc -z -w1 127.0.0.1 "${ASA_RCON_PORT}" >/dev/null 2>&1; then
       notify "ASA server is READY.\nServer: ${ASA_SESSION_NAME}\nMap: ${ASA_MAP}\nAuto-stop: ${ASA_EXPIRES_AT:-unknown}"
       exit 0
     fi
