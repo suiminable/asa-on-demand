@@ -14,6 +14,7 @@
     "synth": "cdk synth",
     "test": "vitest run",
     "test:watch": "vitest",
+    "image:push": "scripts/push-image.sh",
     "discord:register": "tsx scripts/register-discord-commands.ts",
     "smoke": "tsx scripts/smoke-test.ts"
   },

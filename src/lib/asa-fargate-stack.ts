@@ -7,7 +7,7 @@ import * as integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import * as budgets from "aws-cdk-lib/aws-budgets";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
-import * as ecrAssets from "aws-cdk-lib/aws-ecr-assets";
+import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
@@ -60,6 +60,7 @@ function normalizeS3Prefix(prefix: string): string {
 }
 
 function normalizeNameSegment(value: string, fallback = "default"): string {
+  // Keep the ECR repository name derivation in sync with scripts/push-image.sh.
   const normalized = value
     .trim()
     .replace(/^\/+|\/+$/g, "")
@@ -108,6 +109,9 @@ export class AsaFargateStack extends cdk.Stack {
     const enableOnDemandFallback = booleanContext(this, "enableOnDemandFallback", false);
     const allowDiscordPasswordNotification = booleanContext(this, "allowDiscordPasswordNotification", false);
     const asaBuildId = stringContext(this, "asaBuildId") || "initial";
+    if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(asaBuildId)) {
+      throw new Error("Context asaBuildId must be a valid ECR image tag.");
+    }
     const asaUpdateOnStart = booleanContext(this, "asaUpdateOnStart", false);
     const asaClusterId = stringContext(this, "asaClusterId") || resourceNameSegment || "asa-on-demand";
     if (!/^[A-Za-z0-9_.-]{1,64}$/.test(asaClusterId)) {
@@ -163,9 +167,11 @@ export class AsaFargateStack extends cdk.Stack {
     });
     cluster.enableFargateCapacityProviders();
 
-    const imageAsset = new ecrAssets.DockerImageAsset(this, "AsaServerImage", {
-      directory: path.join(rootDir, "container"),
-      buildArgs: { ASA_BUILD_ID: asaBuildId },
+    const serverRepository = new ecr.Repository(this, "AsaServerRepository", {
+      repositoryName: resourcePrefix ? `asa-${resourceNameSegment}-server` : "asa-server",
+      emptyOnDelete: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      lifecycleRules: [{ maxImageCount: 2, description: "Keep only the 2 most recent images" }],
     });
 
     const ecsLogGroup = new logs.LogGroup(this, "AsaEcsLogGroup", {
@@ -193,7 +199,7 @@ export class AsaFargateStack extends cdk.Stack {
     });
 
     taskDefinition.addContainer("AsaServerContainer", {
-      image: ecs.ContainerImage.fromDockerImageAsset(imageAsset),
+      image: ecs.ContainerImage.fromEcrRepository(serverRepository, asaBuildId),
       essential: true,
       stopTimeout: cdk.Duration.seconds(stopTimeoutSeconds),
       healthCheck: {
@@ -241,7 +247,7 @@ export class AsaFargateStack extends cdk.Stack {
     const executionRole = taskDefinition.executionRole;
     if (!executionRole) throw new Error("Fargate task definition is missing an execution role.");
 
-    imageAsset.repository.grantPull(executionRole);
+    serverRepository.grantPull(executionRole);
     notificationWebhookSecret.grantRead(executionRole);
     serverPasswordSecret.grantRead(executionRole);
     adminPasswordSecret.grantRead(executionRole);
@@ -540,6 +546,7 @@ export class AsaFargateStack extends cdk.Stack {
     new cdk.CfnOutput(this, "AsaTaskDefinitionArn", { value: taskDefinition.taskDefinitionArn });
     new cdk.CfnOutput(this, "AsaSecurityGroupId", { value: serverSecurityGroup.securityGroupId });
     new cdk.CfnOutput(this, "AsaStateTableName", { value: stateTable.tableName });
+    new cdk.CfnOutput(this, "AsaEcrRepositoryUri", { value: serverRepository.repositoryUri });
     if (domainName) new cdk.CfnOutput(this, "OptionalDomainName", { value: domainName });
   }
 }

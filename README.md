@@ -2,7 +2,7 @@
 
 AWS CDK v2 project for running a private ARK: Survival Ascended dedicated server on ECS Fargate Spot, controlled through Discord Slash Commands.
 
-The source spec is [asa-fargate-spot-discord-spec.md](./asa-fargate-spot-discord-spec.md).
+The source spec is [asa-fargate-spot-discord-spec.md](./asa-fargate-spot-discord-spec.md). 日本語版は [README.ja.md](./README.ja.md)。
 
 ## Package Manager
 
@@ -19,25 +19,69 @@ pnpm run test
 pnpm run synth
 ```
 
-Bootstrap and deploy:
+## First-Time Setup
 
-```bash
-pnpm exec cdk bootstrap
-pnpm exec cdk deploy \
-  -c region=ap-northeast-1 \
-  -c monthlyBudgetJpy=1500 \
-  -c monthlyRuntimeHoursLimit=80
-```
+The examples below use `--profile my-aws-profile` and the resource prefix `maps/the-island`. For the default unprefixed environment, omit `--resource-prefix`, `--resourcePrefix`, `-c resourcePrefix`, and `RESOURCE_PREFIX`. Docker and AWS credentials are required.
 
-Isolate each independent server environment in its own CloudFormation stack and S3 object namespace by setting `resourcePrefix`:
+1. Bootstrap the account and region (once per account/region):
 
-```bash
-pnpm exec cdk deploy \
-  -c region=ap-northeast-1 \
-  -c resourcePrefix=maps/the-island
-```
+   ```bash
+   pnpm exec cdk bootstrap
+   ```
 
-With this prefix, state files are stored under:
+2. Deploy the stack. The deploy creates the dedicated ECR repository, so the first deploy succeeds before any image exists:
+
+   ```bash
+   pnpm exec cdk deploy \
+     -c region=ap-northeast-1 \
+     -c resourcePrefix=maps/the-island \
+     -c monthlyBudgetJpy=1500 \
+     -c monthlyRuntimeHoursLimit=80
+   ```
+
+3. Build and push the server image. SteamCMD downloads the ASA server during the build, and the resulting image is about 18.5 GB:
+
+   ```bash
+   ./scripts/push-image.sh \
+     --region ap-northeast-1 \
+     --profile my-aws-profile \
+     --resource-prefix maps/the-island
+   ```
+
+4. Store secrets and parameters (details in [Secrets And Parameters](#secrets-and-parameters)):
+
+   ```bash
+   RESOURCE_PREFIX=maps/the-island ./local/put-secrets.sh --profile my-aws-profile
+   ```
+
+5. Optional: upload server settings to the `config/` prefix of the state bucket (the `AsaStateBucketName` CDK output). The container downloads them at every start:
+
+   ```bash
+   aws s3 cp local/GameUserSettings.ini "s3://<AsaStateBucketName>/maps/the-island/config/GameUserSettings.ini"
+   aws s3 cp local/Game.ini "s3://<AsaStateBucketName>/maps/the-island/config/Game.ini"
+   ```
+
+6. In the Discord Developer Portal, set the Interactions Endpoint URL to the `DiscordInteractionsEndpointUrl` CDK output. Discord verifies the endpoint with a signed ping that the Lambda can only answer after step 4 stored the public key.
+
+7. Register the guild commands (details in [Discord](#discord)):
+
+   ```bash
+   pnpm run discord:register \
+     --profile my-aws-profile \
+     --resourcePrefix maps/the-island
+   ```
+
+8. Run `/asa start` in the guild.
+
+Ordering constraints:
+
+- Running `/asa start` before step 3 makes the ECS task stop with an image pull error.
+- Steps 6 and 7 fail before step 4 because both read the Discord credentials from SSM and Secrets Manager.
+- After a destroy/deploy cycle, the API Gateway URL changes: repeat step 6, and re-run step 4 if the secrets and parameters were deleted during teardown. The Discord commands themselves stay registered and need no re-registration.
+
+## Resource Prefixes
+
+Isolate each independent server environment in its own CloudFormation stack and S3 object namespace by setting `-c resourcePrefix`. With `resourcePrefix=maps/the-island`, state files are stored under:
 
 - `maps/the-island/config/`
 - `maps/the-island/saves/`
@@ -75,8 +119,6 @@ For a prefixed map environment, store SSM parameters and Secrets Manager secrets
 
 ```bash
 RESOURCE_PREFIX=maps/the-island ./local/put-secrets.sh --profile my-aws-profile
-pnpm exec cdk deploy \
-  -c resourcePrefix=maps/the-island
 ```
 
 When `resourcePrefix` is set, SSM parameters and Secrets Manager secrets are read from `/asa/<resourcePrefix>`.
@@ -123,6 +165,7 @@ pnpm run build
 pnpm run test
 pnpm run synth
 pnpm run smoke
+pnpm run image:push --profile my-aws-profile
 ```
 
 ## Current Implementation Notes
@@ -132,11 +175,11 @@ pnpm run smoke
 - Fargate Spot is the default capacity provider strategy. On-demand fallback is disabled unless `-c enableOnDemandFallback=true` is provided.
 - The default task size is 4 vCPU and 24 GiB memory.
 - Discord budget output shows both a conservative estimate (`hourlyCostJpy`, default 52 JPY/hour) and a variable Fargate Spot estimate (`spotHourlyCostJpy`, default 17 JPY/hour).
-- ASA and UMU-Proton are installed in the Docker image during `cdk deploy`. Tasks use the bundled files and start Proton directly.
-- To pick up an ASA update, deploy with a new build marker, for example `-c asaBuildId=2026-07-04`. This invalidates the Docker build cache and runs SteamCMD while rebuilding the image.
+- ASA and UMU-Proton are installed when `scripts/push-image.sh` builds the Docker image. CDK synth and deploy do not invoke Docker.
+- To pick up an ASA update, first run `./scripts/push-image.sh --build-id 2026-07-05`, then deploy with the same tag using `pnpm exec cdk deploy -c asaBuildId=2026-07-05`. A missing or mismatched tag makes the ECS task stop with an image pull error.
 - `-c asaUpdateOnStart=true` enables a SteamCMD update on every task start for emergency use. It is disabled by default.
 - Map choices are validated by the Lambda and registered from a shared allowlist. Re-run `pnpm run discord:register` after deploying changes to that list.
 - Cross-map transfers within one stack are asynchronous: cluster data is included in that stack's S3 save archive, but multiple maps are not run simultaneously. Cross-stack transfer is not supported.
 - Discord commands immediately defer the interaction, run AWS operations asynchronously, and return the command result through a follow-up response. Readiness and lifecycle updates go to the configured Discord webhook.
 - The state bucket is versioned; noncurrent object versions expire after 7 days through a bucket lifecycle rule.
-- The CDK bootstrap ECR repository (`cdk-hnb659fds-container-assets-<account>-<region>`) has a manually applied lifecycle policy that keeps only the 2 most recent images. Reapply it with `aws ecr put-lifecycle-policy` after re-bootstrapping.
+- Each stack has a dedicated ECR repository that keeps the 2 most recent images and is deleted with its images when the stack is destroyed.
