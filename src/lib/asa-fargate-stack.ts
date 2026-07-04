@@ -148,6 +148,7 @@ export class AsaFargateStack extends cdk.Stack {
       lifecycleRules: [
         { prefix: s3Key(resourcePrefix, "backups/"), expiration: cdk.Duration.days(30) },
         { prefix: s3Key(resourcePrefix, "logs/"), expiration: cdk.Duration.days(14) },
+        { noncurrentVersionExpiration: cdk.Duration.days(7), expiredObjectDeleteMarker: true },
       ],
     });
 

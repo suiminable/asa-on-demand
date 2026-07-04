@@ -138,3 +138,5 @@ pnpm run smoke
 - Map choices are validated by the Lambda and registered from a shared allowlist. Re-run `pnpm run discord:register` after deploying changes to that list.
 - Cross-map transfers within one stack are asynchronous: cluster data is included in that stack's S3 save archive, but multiple maps are not run simultaneously. Cross-stack transfer is not supported.
 - Discord commands immediately defer the interaction, run AWS operations asynchronously, and return the command result through a follow-up response. Readiness and lifecycle updates go to the configured Discord webhook.
+- The state bucket is versioned; noncurrent object versions expire after 7 days through a bucket lifecycle rule.
+- The CDK bootstrap ECR repository (`cdk-hnb659fds-container-assets-<account>-<region>`) has a manually applied lifecycle policy that keeps only the 2 most recent images. Reapply it with `aws ecr put-lifecycle-policy` after re-bootstrapping.
