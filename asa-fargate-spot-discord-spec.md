@@ -339,10 +339,12 @@ Non-secret parameters:
 /asa/discord/allowed-user-ids
 /asa/server/session-name
 /asa/server/default-map
+/asa/server/enabled-maps (optional)
 /asa/server/max-players
 ```
 
 `allowed-role-ids` と `allowed-user-ids` は JSON array string とする。
+`enabled-maps` はカンマ区切りのマップ値とする。未設定なら全マップを許可し、制限を解除する場合はパラメータを削除する。変更後は Slash commands を再登録する。
 
 例:
 
@@ -396,7 +398,7 @@ Command handling:
 
 | Option | Type | Default | Validation |
 |---|---|---:|---|
-| `duration_hours` | integer | `4` | `1 <= n <= 8` |
+| `duration_hours` | integer | `8` | `1 <= n <= 48` |
 | `map` | string choice | `TheIsland_WP` | allowlist |
 | `max_players` | integer | `4` | `1 <= n <= 8` |
 | `session_name` | string | SSM default | max 50 chars |
@@ -565,7 +567,7 @@ Options:
     "type": 4,
     "required": false,
     "min_value": 1,
-    "max_value": 8
+    "max_value": 48
   },
   {
     "name": "map",
@@ -631,7 +633,7 @@ Status: RUNNING
 Map: TheIsland_WP
 Players: unknown
 Started: 2026-06-24T12:00:00+09:00
-Expires: 2026-06-24T16:00:00+09:00
+Expires: 2026-06-24T20:00:00+09:00
 Connect: open x.x.x.x:7777
 This month: 12.3h / configured limit
 Estimated cost: ¥xxx
@@ -684,7 +686,7 @@ Returns:
 ```text
 ASA server start requested by <user>.
 Map: TheIsland_WP
-TTL: 4h
+TTL: 8h
 Status: STARTING
 ```
 
@@ -885,8 +887,8 @@ CDK context:
 {
   "monthlyBudgetJpy": 1500,
   "monthlyRuntimeHoursLimit": 80,
-  "maxSessionHours": 8,
-  "defaultSessionHours": 4
+  "maxSessionHours": 48,
+  "defaultSessionHours": 8
 }
 ```
 
@@ -1172,7 +1174,7 @@ npm run discord:register
 
 ## 12.1 起動
 
-1. User runs `/asa start duration_hours:4`.
+1. User runs `/asa start duration_hours:8`.
 2. Lambda validates signature and permissions.
 3. Lambda checks DynamoDB state.
 4. Lambda checks budget guard.

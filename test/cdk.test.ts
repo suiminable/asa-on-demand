@@ -83,7 +83,14 @@ describe("AsaFargateStack", () => {
       ]),
     });
     template.hasResourceProperties("AWS::Lambda::Function", {
-      Environment: { Variables: Match.objectLike({ HOURLY_COST_JPY: "52", SPOT_HOURLY_COST_JPY: "17" }) },
+      Environment: {
+        Variables: Match.objectLike({
+          DEFAULT_SESSION_HOURS: "8",
+          MAX_SESSION_HOURS: "48",
+          HOURLY_COST_JPY: "52",
+          SPOT_HOURLY_COST_JPY: "17",
+        }),
+      },
     });
   });
 

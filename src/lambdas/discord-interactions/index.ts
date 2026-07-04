@@ -29,7 +29,7 @@ import {
   userIdFromInteraction,
   verifyDiscordSignature,
 } from "../../shared/discord.js";
-import { isSupportedAsaMap } from "../../shared/maps.js";
+import { isSupportedAsaMap, parseEnabledMaps } from "../../shared/maps.js";
 import { StateStore } from "../../shared/state.js";
 import type { ServerState } from "../../shared/types.js";
 
@@ -137,8 +137,22 @@ async function handleStart(interaction: DiscordInteraction) {
   const options = startOptions(interaction);
   const defaultMap = await getParameter(parameterNames.defaultMap, "TheIsland_WP");
   if (!optionValue<string>(interaction, "map")) options.map = defaultMap;
+  const enabledMaps = parseEnabledMaps(await getParameter(parameterNames.enabledMaps, ""));
+  const unsupportedEnabledMaps = enabledMaps.filter((map) => !isSupportedAsaMap(map));
+  if (unsupportedEnabledMaps.length > 0) {
+    return message(
+      `The enabled-maps parameter contains unsupported map values: ${unsupportedEnabledMaps.join(", ")}. Update the parameter and re-register the Discord commands.`,
+      true,
+    );
+  }
   if (!isSupportedAsaMap(options.map)) {
     return message(`Unsupported map: ${options.map}. Re-register the Discord commands after adding a supported map.`, true);
+  }
+  if (enabledMaps.length > 0 && !enabledMaps.includes(options.map)) {
+    return message(
+      `Map ${options.map} is not enabled for this server. Enabled maps: ${enabledMaps.join(", ")}. If this is the default map, update the default-map parameter, then re-register the Discord commands.`,
+      true,
+    );
   }
   const sessionName = await getParameter(parameterNames.sessionName, "private-asa");
   const configuredMaxPlayers = Number(await getParameter(parameterNames.maxPlayers, "4"));

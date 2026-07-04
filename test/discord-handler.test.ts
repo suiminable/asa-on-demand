@@ -3,6 +3,7 @@ import nacl from "tweetnacl";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  fetch: vi.fn(),
   lambdaSend: vi.fn(),
   parameters: new Map<string, string>(),
 }));
@@ -33,6 +34,32 @@ const keyPair = nacl.sign.keyPair();
 const publicKey = Buffer.from(keyPair.publicKey).toString("hex");
 let handler: typeof import("../src/lambdas/discord-interactions/index.js").handler;
 
+function startInteraction(map?: string) {
+  return {
+    id: "interaction-start",
+    application_id: "application-1",
+    token: "token-start",
+    type: 2,
+    guild_id: "guild-1",
+    member: { user: { id: "user-1" }, roles: [] },
+    data: {
+      options: [
+        {
+          type: 1,
+          name: "start",
+          options: map ? [{ name: "map", value: map }] : [],
+        },
+      ],
+    },
+  };
+}
+
+async function runAsyncStart(map?: string): Promise<string> {
+  await handler({ source: "asa.discord.command", interaction: startInteraction(map) });
+  const request = mocks.fetch.mock.calls.at(-1)?.[1] as { body?: string } | undefined;
+  return JSON.parse(request?.body ?? "{}").content ?? "";
+}
+
 function signedEvent(interaction: object): APIGatewayProxyEventV2 {
   const body = JSON.stringify(interaction);
   const timestamp = String(Math.floor(Date.now() / 1000));
@@ -44,7 +71,7 @@ function signedEvent(interaction: object): APIGatewayProxyEventV2 {
   } as unknown as APIGatewayProxyEventV2;
 }
 
-beforeAll(async () => {
+beforeAll(() => {
   Object.assign(process.env, {
     TABLE_NAME: "table",
     CLUSTER_ARN: "cluster",
@@ -56,15 +83,20 @@ beforeAll(async () => {
     S3_BUCKET: "bucket",
     AWS_LAMBDA_FUNCTION_NAME: "discord-handler",
   });
+  vi.stubGlobal("fetch", mocks.fetch);
+});
+
+beforeEach(async () => {
+  vi.resetModules();
+  mocks.parameters.clear();
   mocks.parameters.set("/asa/discord/public-key", publicKey);
   mocks.parameters.set("/asa/discord/guild-id", "guild-1");
   mocks.parameters.set("/asa/discord/allowed-user-ids", '["user-1"]');
   mocks.parameters.set("/asa/discord/allowed-role-ids", "[]");
-  ({ handler } = await import("../src/lambdas/discord-interactions/index.js"));
-});
-
-beforeEach(() => {
+  mocks.parameters.set("/asa/server/session-name", "invalid session name");
   mocks.lambdaSend.mockReset().mockResolvedValue({ StatusCode: 202 });
+  mocks.fetch.mockReset().mockResolvedValue({ ok: true });
+  ({ handler } = await import("../src/lambdas/discord-interactions/index.js"));
 });
 
 describe("Discord interaction handler", () => {
@@ -110,5 +142,40 @@ describe("Discord interaction handler", () => {
     expect(command.input.FunctionName).toBe("discord-handler");
     expect(command.input.InvocationType).toBe("Event");
     expect(JSON.parse(Buffer.from(command.input.Payload).toString())).toEqual({ source: "asa.discord.command", interaction });
+  });
+
+  it("allows every supported map when enabled-maps is not configured", async () => {
+    expect(await runAsyncStart("Ragnarok_WP")).toContain("Configured session name is invalid");
+  });
+
+  it("rejects a map outside the configured enabled-maps subset", async () => {
+    mocks.parameters.set("/asa/server/enabled-maps", "TheIsland_WP,ScorchedEarth_WP");
+
+    const content = await runAsyncStart("Ragnarok_WP");
+
+    expect(content).toContain("Map Ragnarok_WP is not enabled for this server");
+    expect(content).toContain("TheIsland_WP, ScorchedEarth_WP");
+  });
+
+  it("accepts a map inside the configured enabled-maps subset", async () => {
+    mocks.parameters.set("/asa/server/enabled-maps", "TheIsland_WP,ScorchedEarth_WP");
+
+    expect(await runAsyncStart("ScorchedEarth_WP")).toContain("Configured session name is invalid");
+  });
+
+  it("rejects a configured default map outside the enabled-maps subset", async () => {
+    mocks.parameters.set("/asa/server/default-map", "Ragnarok_WP");
+    mocks.parameters.set("/asa/server/enabled-maps", "TheIsland_WP,ScorchedEarth_WP");
+
+    const content = await runAsyncStart();
+
+    expect(content).toContain("Map Ragnarok_WP is not enabled for this server");
+    expect(content).toContain("update the default-map parameter");
+  });
+
+  it("reports unsupported values in the enabled-maps parameter", async () => {
+    mocks.parameters.set("/asa/server/enabled-maps", "TheIsland_WP,Unknown_WP");
+
+    expect(await runAsyncStart("TheIsland_WP")).toContain("enabled-maps parameter contains unsupported map values: Unknown_WP");
   });
 });

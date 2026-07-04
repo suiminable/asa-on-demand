@@ -2,9 +2,10 @@ import nacl from "tweetnacl";
 import { describe, expect, it } from "vitest";
 import { canStart, hours, monthKey } from "../src/shared/budget.js";
 import { normalizeConfigPrefix, parameterNamesFor, secretNamesFor } from "../src/shared/config.js";
+import { DEFAULT_SESSION_HOURS, MAX_SESSION_HOURS } from "../src/shared/defaults.js";
 import { isAuthorized, verifyDiscordSignature } from "../src/shared/discord.js";
 import { connectCommandForIp, eniIdFromTask, taskStopReason } from "../src/shared/ecs.js";
-import { ASA_MAPS, isSupportedAsaMap } from "../src/shared/maps.js";
+import { ASA_MAPS, isSupportedAsaMap, parseEnabledMaps } from "../src/shared/maps.js";
 
 describe("Discord helpers", () => {
   it("verifies valid Ed25519 signatures", () => {
@@ -82,6 +83,7 @@ describe("Config helpers", () => {
   it("normalizes scoped SSM and Secrets Manager prefixes", () => {
     expect(normalizeConfigPrefix(" /asa/maps/the-island/ ")).toBe("/asa/maps/the-island");
     expect(parameterNamesFor("/asa/maps/the-island").defaultMap).toBe("/asa/maps/the-island/server/default-map");
+    expect(parameterNamesFor("/asa/maps/the-island").enabledMaps).toBe("/asa/maps/the-island/server/enabled-maps");
     expect(secretNamesFor("/asa/maps/the-island").serverPassword).toBe("/asa/maps/the-island/server/password");
   });
 });
@@ -91,5 +93,18 @@ describe("ASA maps", () => {
     expect(ASA_MAPS).toContainEqual({ name: "The Island", value: "TheIsland_WP" });
     expect(isSupportedAsaMap("Ragnarok_WP")).toBe(true);
     expect(isSupportedAsaMap("Genesis2_WP")).toBe(false);
+  });
+
+  it("parses comma-separated enabled maps and ignores whitespace and empty values", () => {
+    expect(parseEnabledMaps("")).toEqual([]);
+    expect(parseEnabledMaps("  ,  ")).toEqual([]);
+    expect(parseEnabledMaps(" TheIsland_WP, , ScorchedEarth_WP ")).toEqual(["TheIsland_WP", "ScorchedEarth_WP"]);
+  });
+});
+
+describe("Session defaults", () => {
+  it("uses an 8-hour default and a 48-hour maximum", () => {
+    expect(DEFAULT_SESSION_HOURS).toBe(8);
+    expect(MAX_SESSION_HOURS).toBe(48);
   });
 });

@@ -14,6 +14,7 @@ const parameterSuffixes = {
   allowedUserIds: "/discord/allowed-user-ids",
   sessionName: "/server/session-name",
   defaultMap: "/server/default-map",
+  enabledMaps: "/server/enabled-maps",
   maxPlayers: "/server/max-players",
 } as const;
 

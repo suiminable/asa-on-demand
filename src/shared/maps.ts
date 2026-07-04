@@ -12,6 +12,13 @@ export const ASA_MAPS = [
 
 const asaMapValues = new Set<string>(ASA_MAPS.map((map) => map.value));
 
+export function parseEnabledMaps(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
 export function isSupportedAsaMap(value: string): boolean {
   return asaMapValues.has(value);
 }
