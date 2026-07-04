@@ -26,7 +26,7 @@ fi
 
 tar --zstd -cf "${archive}" -C "${ASA_INSTALL_DIR}/ShooterGame" Saved
 aws s3 cp "${archive}" "s3://${S3_BUCKET}/${S3_SAVE_KEY}"
-aws s3 cp "s3://${S3_BUCKET}/${S3_SAVE_KEY}" "s3://${S3_BUCKET}/${S3_BACKUP_PREFIX}${dated_path}"
+aws s3 cp "${archive}" "s3://${S3_BUCKET}/${S3_BACKUP_PREFIX}${dated_path}"
 jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg key "${S3_BACKUP_PREFIX}${dated_path}" '{lastBackupAt: $at, key: $key}' \
   | aws s3 cp - "s3://${S3_BUCKET}/${S3_RUNTIME_PREFIX}last-backup.json" --content-type application/json
 rm -f "${archive}"

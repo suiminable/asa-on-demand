@@ -28,7 +28,7 @@ const clusterArn = requireEnv("CLUSTER_ARN");
 const webhookSecretName = requireEnv("NOTIFICATION_WEBHOOK_SECRET_NAME");
 const domainName = process.env.DOMAIN_NAME || undefined;
 const hostedZoneId = process.env.HOSTED_ZONE_ID || undefined;
-const hourlyCostJpy = Number(process.env.HOURLY_COST_JPY ?? "18.75");
+const hourlyCostJpy = Number(process.env.HOURLY_COST_JPY ?? "52");
 const jpyPerUsd = Number(process.env.JPY_PER_USD ?? "150");
 
 async function resolvePublicIp(taskArn: string): Promise<string | undefined> {

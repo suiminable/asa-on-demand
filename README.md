@@ -130,7 +130,8 @@ pnpm run smoke
 - ECS tasks are started via `RunTask`; no ECS Service is created.
 - The VPC has public subnets only and no NAT Gateway.
 - Fargate Spot is the default capacity provider strategy. On-demand fallback is disabled unless `-c enableOnDemandFallback=true` is provided.
-- The default task size is 2 vCPU and 16 GiB memory. Larger maps that exceed this require moving to 4 vCPU with a higher `asaMemoryMiB` value.
+- The default task size is 4 vCPU and 24 GiB memory.
+- Discord budget output shows both a conservative estimate (`hourlyCostJpy`, default 52 JPY/hour) and a variable Fargate Spot estimate (`spotHourlyCostJpy`, default 17 JPY/hour).
 - ASA and UMU-Proton are installed in the Docker image during `cdk deploy`. Tasks use the bundled files and start Proton directly.
 - To pick up an ASA update, deploy with a new build marker, for example `-c asaBuildId=2026-07-04`. This invalidates the Docker build cache and runs SteamCMD while rebuilding the image.
 - `-c asaUpdateOnStart=true` enables a SteamCMD update on every task start for emergency use. It is disabled by default.

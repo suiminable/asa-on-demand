@@ -52,6 +52,7 @@ const secretNames = secretNamesFor(process.env.CONFIG_PREFIX);
 const maxSessionHours = intEnv("MAX_SESSION_HOURS", MAX_SESSION_HOURS);
 const defaultSessionHours = intEnv("DEFAULT_SESSION_HOURS", DEFAULT_SESSION_HOURS);
 const monthlyRuntimeHoursLimit = intEnv("MONTHLY_RUNTIME_HOURS_LIMIT", 80);
+const spotHourlyCostJpy = Number(process.env.SPOT_HOURLY_COST_JPY ?? "17");
 const enableOnDemandFallback = process.env.ENABLE_ON_DEMAND_FALLBACK === "true";
 const allowDiscordPasswordNotification = process.env.ALLOW_DISCORD_PASSWORD_NOTIFICATION === "true";
 const functionName = requireEnv("AWS_LAMBDA_FUNCTION_NAME");
@@ -80,6 +81,10 @@ function response(statusCode: number, body: unknown): APIGatewayProxyStructuredR
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   };
+}
+
+function spotCostJpy(runtimeSeconds: number): number {
+  return (runtimeSeconds / 3600) * spotHourlyCostJpy;
 }
 
 function rawBody(event: APIGatewayProxyEventV2): string {
@@ -276,6 +281,7 @@ async function handleStop(interaction: DiscordInteraction) {
 async function handleStatus() {
   const state = await store.getServer();
   const budget = await store.getBudget(monthKey());
+  const runtimeSeconds = budget?.runtimeSeconds ?? 0;
   if (!state) return message("Status: STOPPED\nThis month: 0h", true);
   return message(
     [
@@ -285,8 +291,9 @@ async function handleStatus() {
       `Started: ${state.startedAt ?? "N/A"}`,
       `Expires: ${state.expiresAt ?? "N/A"}`,
       `Connect: ${state.connectCommand ?? "not available"}`,
-      `This month: ${hours(budget?.runtimeSeconds ?? 0)}h / ${monthlyRuntimeHoursLimit}h`,
-      `Estimated cost: ¥${Math.round(budget?.estimatedCostJpy ?? 0)}`,
+      `This month: ${hours(runtimeSeconds)}h / ${monthlyRuntimeHoursLimit}h`,
+      `Estimated cost (conservative): ¥${Math.round(budget?.estimatedCostJpy ?? 0)}`,
+      `Estimated cost (Fargate Spot approx.): ¥${Math.round(spotCostJpy(runtimeSeconds))}`,
     ].join("\n"),
     true,
   );
@@ -322,11 +329,13 @@ async function handleBackup() {
 
 async function handleBudget() {
   const budget = await store.getBudget(monthKey());
+  const runtimeSeconds = budget?.runtimeSeconds ?? 0;
   return message(
     [
       `Starts: ${budget?.startCount ?? 0}`,
-      `Runtime: ${hours(budget?.runtimeSeconds ?? 0)}h / ${monthlyRuntimeHoursLimit}h`,
-      `Estimated cost: ¥${Math.round(budget?.estimatedCostJpy ?? 0)}`,
+      `Runtime: ${hours(runtimeSeconds)}h / ${monthlyRuntimeHoursLimit}h`,
+      `Estimated cost (conservative): ¥${Math.round(budget?.estimatedCostJpy ?? 0)}`,
+      `Estimated cost (Fargate Spot approx.): ¥${Math.round(spotCostJpy(runtimeSeconds))}`,
     ].join("\n"),
     true,
   );

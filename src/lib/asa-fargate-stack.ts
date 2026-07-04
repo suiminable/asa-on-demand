@@ -94,14 +94,15 @@ export class AsaFargateStack extends cdk.Stack {
     const configPrefix = normalizeConfigPrefix(resourcePrefix ? `/asa/${resourcePrefix}` : "/asa");
     const parameterNames = parameterNamesFor(configPrefix);
     const secretNames = secretNamesFor(configPrefix);
-    const cpu = numberContext(this, { name: "asaCpu", defaultValue: 2048 });
-    const memoryMiB = numberContext(this, { name: "asaMemoryMiB", defaultValue: 16384 });
+    const cpu = numberContext(this, { name: "asaCpu", defaultValue: 4096 });
+    const memoryMiB = numberContext(this, { name: "asaMemoryMiB", defaultValue: 24576 });
     const ephemeralStorageGiB = numberContext(this, { name: "asaEphemeralStorageGiB", defaultValue: 100 });
     const stopTimeoutSeconds = numberContext(this, { name: "asaStopTimeoutSeconds", defaultValue: 120 });
     const defaultSessionHours = numberContext(this, { name: "defaultSessionHours", defaultValue: DEFAULT_SESSION_HOURS });
     const maxSessionHours = numberContext(this, { name: "maxSessionHours", defaultValue: MAX_SESSION_HOURS });
     const monthlyBudgetJpy = numberContext(this, { name: "monthlyBudgetJpy", defaultValue: 1500 });
-    const hourlyCostJpy = numberContext(this, { name: "hourlyCostJpy", defaultValue: 18.75 });
+    const hourlyCostJpy = numberContext(this, { name: "hourlyCostJpy", defaultValue: 52 });
+    const spotHourlyCostJpy = numberContext(this, { name: "spotHourlyCostJpy", defaultValue: 17 });
     const jpyPerUsd = numberContext(this, { name: "jpyPerUsd", defaultValue: 150 });
     const monthlyRuntimeHoursLimit = numberContext(this, { name: "monthlyRuntimeHoursLimit", defaultValue: 80 });
     const enableOnDemandFallback = booleanContext(this, "enableOnDemandFallback", false);
@@ -199,7 +200,7 @@ export class AsaFargateStack extends cdk.Stack {
         interval: cdk.Duration.seconds(30),
         timeout: cdk.Duration.seconds(5),
         retries: 3,
-        startPeriod: cdk.Duration.minutes(10),
+        startPeriod: cdk.Duration.minutes(5),
       },
       logging: ecs.LogDrivers.awsLogs({
         logGroup: ecsLogGroup,
@@ -317,6 +318,7 @@ export class AsaFargateStack extends cdk.Stack {
       MONTHLY_RUNTIME_HOURS_LIMIT: String(monthlyRuntimeHoursLimit),
       MONTHLY_BUDGET_JPY: String(monthlyBudgetJpy),
       HOURLY_COST_JPY: String(hourlyCostJpy),
+      SPOT_HOURLY_COST_JPY: String(spotHourlyCostJpy),
       JPY_PER_USD: String(jpyPerUsd),
       ENABLE_ON_DEMAND_FALLBACK: String(enableOnDemandFallback),
       ALLOW_DISCORD_PASSWORD_NOTIFICATION: String(allowDiscordPasswordNotification),
@@ -338,7 +340,14 @@ export class AsaFargateStack extends cdk.Stack {
     discordInteractions.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["lambda:InvokeFunction"],
-        resources: [this.formatArn({ service: "lambda", resource: "function", resourceName: discordFunctionName })],
+        resources: [
+          this.formatArn({
+            service: "lambda",
+            resource: "function",
+            resourceName: discordFunctionName,
+            arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+          }),
+        ],
       }),
     );
 

@@ -11,7 +11,7 @@ export function eniIdFromTask(task: Task): string | undefined {
 
 export function connectCommandForIp(publicIp: string | undefined, domainName?: string): string | null {
   const host = domainName || publicIp;
-  return host ? `open ${host}:7777` : null;
+  return host ? `open ${host}:7777?Password=YOUR_SERVER_PASSWORD` : null;
 }
 
 export function taskStopReason(stoppedReason: string | undefined, containers: Array<{ reason?: string }> | undefined): string {

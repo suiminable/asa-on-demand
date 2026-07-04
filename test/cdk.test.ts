@@ -34,8 +34,8 @@ describe("AsaFargateStack", () => {
     const template = synthTemplate();
     template.hasResourceProperties("AWS::ECS::TaskDefinition", {
       RequiresCompatibilities: ["FARGATE"],
-      Cpu: "2048",
-      Memory: "16384",
+      Cpu: "4096",
+      Memory: "24576",
       EphemeralStorage: { SizeInGiB: 100 },
       RuntimePlatform: {
         CpuArchitecture: "X86_64",
@@ -48,7 +48,7 @@ describe("AsaFargateStack", () => {
             Command: ["CMD-SHELL", "/asa/scripts/healthcheck.sh"],
             Interval: 30,
             Retries: 3,
-            StartPeriod: 600,
+            StartPeriod: 300,
             Timeout: 5,
           },
           Environment: Match.arrayWith([
@@ -57,6 +57,28 @@ describe("AsaFargateStack", () => {
           ]),
         }),
       ]),
+    });
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: { Variables: Match.objectLike({ HOURLY_COST_JPY: "52", SPOT_HOURLY_COST_JPY: "17" }) },
+    });
+  });
+
+  it("allows the Discord Lambda to invoke its exact function ARN", () => {
+    const template = synthTemplate({ resourcePrefix: "maps/the-island" });
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: "lambda:InvokeFunction",
+            Effect: "Allow",
+            Resource: {
+              "Fn::Join": Match.arrayWith([
+                Match.arrayWith([":function:asa-maps-the-island-discord-df84a7b3"]),
+              ]),
+            },
+          }),
+        ]),
+      },
     });
   });
 
