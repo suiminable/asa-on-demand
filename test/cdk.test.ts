@@ -15,6 +15,30 @@ function synthTemplate(context: Record<string, unknown> = {}) {
   return Template.fromStack(new AsaFargateStack(app, "TestAsaFargateStack"));
 }
 
+function taskImage(template: Template): unknown {
+  const taskDefinitions = Object.values(template.findResources("AWS::ECS::TaskDefinition"));
+  return taskDefinitions[0].Properties.ContainerDefinitions[0].Image;
+}
+
+function expectedEcrImage(repositoryLogicalId: string, tag: string): unknown {
+  const repositoryArn = { "Fn::GetAtt": [repositoryLogicalId, "Arn"] };
+  return {
+    "Fn::Join": [
+      "",
+      [
+        { "Fn::Select": [4, { "Fn::Split": [":", repositoryArn] }] },
+        ".dkr.ecr.",
+        { "Fn::Select": [3, { "Fn::Split": [":", repositoryArn] }] },
+        ".",
+        { Ref: "AWS::URLSuffix" },
+        "/",
+        { Ref: repositoryLogicalId },
+        `:${tag}`,
+      ],
+    ],
+  };
+}
+
 describe("AsaFargateStack", () => {
   it("does not create excluded compute/network resources", () => {
     const template = synthTemplate();
@@ -72,9 +96,7 @@ describe("AsaFargateStack", () => {
             Action: "lambda:InvokeFunction",
             Effect: "Allow",
             Resource: {
-              "Fn::Join": Match.arrayWith([
-                Match.arrayWith([":function:asa-maps-the-island-discord-df84a7b3"]),
-              ]),
+              "Fn::Join": Match.arrayWith([Match.arrayWith([":function:asa-maps-the-island-discord-df84a7b3"])]),
             },
           }),
         ]),
@@ -103,6 +125,34 @@ describe("AsaFargateStack", () => {
   it("creates no ECS service", () => {
     const template = synthTemplate();
     expect(() => template.resourceCountIs("AWS::ECS::Service", 0)).not.toThrow();
+  });
+
+  it("creates a dedicated ECR repository and uses its initial image", () => {
+    const template = synthTemplate();
+    const repositories = template.findResources("AWS::ECR::Repository");
+    const [repositoryLogicalId] = Object.keys(repositories);
+
+    template.resourceCountIs("AWS::ECR::Repository", 1);
+    template.hasResourceProperties("AWS::ECR::Repository", {
+      RepositoryName: "asa-server",
+      LifecyclePolicy: { LifecyclePolicyText: Match.anyValue() },
+    });
+    expect(taskImage(template)).toEqual(expectedEcrImage(repositoryLogicalId, "initial"));
+  });
+
+  it("scopes the ECR repository and image tag by context", () => {
+    const template = synthTemplate({ resourcePrefix: "maps/the-island", asaBuildId: "2026-07-05" });
+    const repositories = template.findResources("AWS::ECR::Repository");
+    const [repositoryLogicalId] = Object.keys(repositories);
+
+    template.hasResourceProperties("AWS::ECR::Repository", {
+      RepositoryName: "asa-maps-the-island-server",
+    });
+    expect(taskImage(template)).toEqual(expectedEcrImage(repositoryLogicalId, "2026-07-05"));
+  });
+
+  it("rejects an invalid ECR image tag", () => {
+    expect(() => synthTemplate({ asaBuildId: "invalid/tag" })).toThrow("Context asaBuildId must be a valid ECR image tag.");
   });
 
   it("keeps the default S3 layout when no resource prefix is provided", () => {

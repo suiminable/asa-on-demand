@@ -184,15 +184,17 @@ fallback を入れる場合は CDK context で明示的に有効化する。
 
 ### ECR
 
-- `AsaServerRepository` を作る。
-- CDK の `DockerImageAsset` で `container/` をビルドして ECR に push する。
-- ASA server 本体は image に焼き込まない。
+- スタック専用の `AsaServerRepository` を作る。
+- `scripts/push-image.sh` で `container/` をビルドし、専用 ECR に push する。
+- ASA server 本体と UMU-Proton は image に焼き込む。
+- image tag は CDK context の `asaBuildId` と一致させる。
+- 最新 2 image のみ保持し、stack destroy 時は repository と image を削除する。
 
 理由:
 
-- ASA server 本体は大きい。
-- Steam 側の更新を image rebuild なしで取り込める。
-- 配布物の扱いを image artifact に混ぜない。
+- 約 18.5GB の image build を CDK synth/deploy から分離する。
+- CDK bootstrap の共有 repository に他アプリと競合する lifecycle policy を設定しない。
+- ASA build と image tag の対応を人間が識別できるようにする。
 
 ### Dockerfile要件
 
@@ -1021,6 +1023,7 @@ Do not allow broad `s3:*`.
 └── scripts
     ├── register-discord-commands.ts
     ├── put-secrets.example.sh
+    ├── push-image.sh
     └── smoke-test.ts
 ```
 
@@ -1032,7 +1035,7 @@ Do not allow broad `s3:*`.
 - SecurityGroup
 - S3 Bucket
 - DynamoDB Table
-- ECR DockerImageAsset
+- Dedicated ECR Repository
 - ECS Cluster
 - Fargate TaskDefinition
 - CloudWatch LogGroup
@@ -1054,6 +1057,7 @@ AsaClusterName
 AsaTaskDefinitionArn
 AsaSecurityGroupId
 AsaStateTableName
+AsaEcrRepositoryUri
 OptionalDomainName
 ```
 
@@ -1136,6 +1140,21 @@ cdk deploy \
   -c region=ap-northeast-1 \
   -c monthlyBudgetJpy=1500 \
   -c monthlyRuntimeHoursLimit=80
+
+# deploy で専用 repository を作成した後に実行する
+./scripts/push-image.sh \
+  --region ap-northeast-1 \
+  --build-id initial
+```
+
+初回起動は image push 後に行う。push 前に `/asa start` した場合や、push した tag と
+deploy 時の `-c asaBuildId` が一致しない場合、task は image pull error で停止する。
+
+ASA 更新時は新しい tag で push してから同じ tag を deploy する。
+
+```bash
+./scripts/push-image.sh --build-id 2026-07-05
+cdk deploy -c asaBuildId=2026-07-05
 ```
 
 ## 11.4 Discord Developer Portal
@@ -1296,7 +1315,7 @@ Codex は以下の順で実装すること。
 2. `AsaFargateStack` を作る。
 3. VPC public subnet only を作る。
 4. S3 bucket, DynamoDB table, ECS cluster, task definition を作る。
-5. DockerImageAsset で `container/` を image build する。
+5. 専用 ECR repository と `scripts/push-image.sh` を作る。
 6. DiscordInteractionLambda を実装する。
 7. StopServerLambda を実装する。
 8. EcsTaskEventsLambda を実装する。

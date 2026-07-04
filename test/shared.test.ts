@@ -66,9 +66,7 @@ describe("ECS helpers", () => {
 
   it("builds connect commands", () => {
     expect(connectCommandForIp("203.0.113.10")).toBe("open 203.0.113.10:7777?Password=YOUR_SERVER_PASSWORD");
-    expect(connectCommandForIp("203.0.113.10", "ark.example.com")).toBe(
-      "open ark.example.com:7777?Password=YOUR_SERVER_PASSWORD",
-    );
+    expect(connectCommandForIp("203.0.113.10", "ark.example.com")).toBe("open ark.example.com:7777?Password=YOUR_SERVER_PASSWORD");
     expect(connectCommandForIp(undefined)).toBeNull();
   });
 
