@@ -1,25 +1,40 @@
 import { ECSClient, RunTaskCommand, StopTaskCommand } from "@aws-sdk/client-ecs";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CreateScheduleCommand, DeleteScheduleCommand, SchedulerClient } from "@aws-sdk/client-scheduler";
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from "aws-lambda";
 import { canStart, hours, monthKey } from "../../shared/budget.js";
-import { getJsonArrayParameter, getParameter, getSecret, intEnv, parameterNames, requireEnv, secretNames } from "../../shared/config.js";
+import {
+  getJsonArrayParameter,
+  getParameter,
+  getSecret,
+  intEnv,
+  parameterNamesFor,
+  requireEnv,
+  secretNamesFor,
+} from "../../shared/config.js";
+import { DEFAULT_MAX_PLAYERS, DEFAULT_SESSION_HOURS, MAX_PLAYERS, MAX_SESSION_HOURS } from "../../shared/defaults.js";
 import {
   type DiscordInteraction,
+  deferred,
+  EPHEMERAL,
   InteractionResponseType,
   InteractionType,
   isAuthorized,
   message,
   optionValue,
+  postInteractionFollowup,
   postWebhook,
   subcommandName,
   userIdFromInteraction,
   verifyDiscordSignature,
 } from "../../shared/discord.js";
+import { isSupportedAsaMap } from "../../shared/maps.js";
 import { StateStore } from "../../shared/state.js";
 import type { ServerState } from "../../shared/types.js";
 
 const ecs = new ECSClient({});
+const lambda = new LambdaClient({});
 const scheduler = new SchedulerClient({});
 const s3 = new S3Client({});
 
@@ -31,11 +46,32 @@ const securityGroupId = requireEnv("SECURITY_GROUP_ID");
 const stopScheduleName = requireEnv("STOP_SCHEDULE_NAME");
 const stopSchedulerRoleArn = requireEnv("STOP_SCHEDULER_ROLE_ARN");
 const bucketName = requireEnv("S3_BUCKET");
-const maxSessionHours = intEnv("MAX_SESSION_HOURS", 8);
-const defaultSessionHours = intEnv("DEFAULT_SESSION_HOURS", 4);
+const s3RuntimePrefix = process.env.S3_RUNTIME_PREFIX ?? "runtime/";
+const parameterNames = parameterNamesFor(process.env.CONFIG_PREFIX);
+const secretNames = secretNamesFor(process.env.CONFIG_PREFIX);
+const maxSessionHours = intEnv("MAX_SESSION_HOURS", MAX_SESSION_HOURS);
+const defaultSessionHours = intEnv("DEFAULT_SESSION_HOURS", DEFAULT_SESSION_HOURS);
 const monthlyRuntimeHoursLimit = intEnv("MONTHLY_RUNTIME_HOURS_LIMIT", 80);
+const spotHourlyCostJpy = Number(process.env.SPOT_HOURLY_COST_JPY ?? "17");
 const enableOnDemandFallback = process.env.ENABLE_ON_DEMAND_FALLBACK === "true";
 const allowDiscordPasswordNotification = process.env.ALLOW_DISCORD_PASSWORD_NOTIFICATION === "true";
+const functionName = requireEnv("AWS_LAMBDA_FUNCTION_NAME");
+const startingStaleMs = 10 * 60 * 1000;
+
+interface AsyncCommandEvent {
+  source: "asa.discord.command";
+  interaction: DiscordInteraction;
+}
+
+function isAsyncCommandEvent(event: APIGatewayProxyEventV2 | AsyncCommandEvent): event is AsyncCommandEvent {
+  return "source" in event && event.source === "asa.discord.command";
+}
+
+function isStaleStarting(state: ServerState | undefined, now: Date): boolean {
+  if (state?.status !== "STARTING" || state.taskArn) return false;
+  const updatedAt = Date.parse(state.updatedAt);
+  return Number.isFinite(updatedAt) && now.getTime() - updatedAt >= startingStaleMs;
+}
 
 const store = new StateStore(tableName);
 
@@ -45,6 +81,10 @@ function response(statusCode: number, body: unknown): APIGatewayProxyStructuredR
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   };
+}
+
+function spotCostJpy(runtimeSeconds: number): number {
+  return (runtimeSeconds / 3600) * spotHourlyCostJpy;
 }
 
 function rawBody(event: APIGatewayProxyEventV2): string {
@@ -58,7 +98,7 @@ function startOptions(interaction: DiscordInteraction) {
     maxSessionHours,
   );
   const map = optionValue<string>(interaction, "map") ?? "TheIsland_WP";
-  const maxPlayers = Math.min(Math.max(Number(optionValue<number>(interaction, "max_players") ?? 4), 1), 8);
+  const maxPlayers = Math.min(Math.max(Number(optionValue<number>(interaction, "max_players") ?? DEFAULT_MAX_PLAYERS), 1), MAX_PLAYERS);
   const publicNotify = optionValue<boolean>(interaction, "public_notify") ?? true;
   return { durationHours, map, maxPlayers, publicNotify };
 }
@@ -95,12 +135,24 @@ async function deleteStopSchedule(): Promise<void> {
 async function handleStart(interaction: DiscordInteraction) {
   const now = new Date();
   const options = startOptions(interaction);
+  const defaultMap = await getParameter(parameterNames.defaultMap, "TheIsland_WP");
+  if (!optionValue<string>(interaction, "map")) options.map = defaultMap;
+  if (!isSupportedAsaMap(options.map)) {
+    return message(`Unsupported map: ${options.map}. Re-register the Discord commands after adding a supported map.`, true);
+  }
   const sessionName = await getParameter(parameterNames.sessionName, "private-asa");
+  const configuredMaxPlayers = Number(await getParameter(parameterNames.maxPlayers, "4"));
+  if (!optionValue<number>(interaction, "max_players") && Number.isFinite(configuredMaxPlayers)) {
+    options.maxPlayers = Math.min(Math.max(configuredMaxPlayers, 1), MAX_PLAYERS);
+  }
   if (!/^[A-Za-z0-9_.-]{1,64}$/.test(sessionName)) {
     return message("Configured session name is invalid. Use only A-Z, a-z, 0-9, underscore, dot, and hyphen.", true);
   }
   const existing = await store.getServer();
-  if (existing?.status === "STARTING" || existing?.status === "RUNNING" || existing?.status === "STOPPING") {
+  if (
+    (existing?.status === "STARTING" || existing?.status === "RUNNING" || existing?.status === "STOPPING") &&
+    !isStaleStarting(existing, now)
+  ) {
     return message(`ASA server is already ${existing.status}.\nConnect: ${existing.connectCommand ?? "not available yet"}`, true);
   }
   const budgetPk = monthKey(now);
@@ -128,8 +180,9 @@ async function handleStart(interaction: DiscordInteraction) {
     lastStopReason: null,
     updatedAt: now.toISOString(),
   };
-  await store.putServerStarting(state);
+  await store.putServerStarting(state, new Date(now.getTime() - startingStaleMs).toISOString());
 
+  let taskArn: string;
   try {
     const runTask = await ecs.send(
       new RunTaskCommand({
@@ -166,27 +219,48 @@ async function handleStart(interaction: DiscordInteraction) {
     );
     const failure = runTask.failures?.[0];
     if (failure) throw new Error(`${failure.arn ?? "RunTask"}: ${failure.reason ?? "unknown failure"}`);
-    const taskArn = runTask.tasks?.[0]?.taskArn;
-    if (!taskArn) throw new Error("RunTask returned no taskArn.");
+    const startedTaskArn = runTask.tasks?.[0]?.taskArn;
+    if (!startedTaskArn) throw new Error("RunTask returned no taskArn.");
+    taskArn = startedTaskArn;
+  } catch (error) {
+    await store.updateServerStatus("ERROR", { lastStopReason: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+
+  try {
     await store.updateServerStatus("STARTING", { taskArn });
-    await store.incrementStartCount(budgetPk);
     await createStopSchedule(expiresAt);
-    if (options.publicNotify) {
+  } catch (error) {
+    await ecs
+      .send(new StopTaskCommand({ cluster: clusterArn, task: taskArn, reason: "START_ROLLBACK after initialization failure" }))
+      .catch((stopError) => console.error("Failed to roll back started task", stopError));
+    await store
+      .updateServerStatus("STOPPING", { lastStopReason: error instanceof Error ? error.message : String(error) })
+      .catch((stateError) => console.error("Failed to record start rollback", stateError));
+    throw new Error(`ASA task was stopped because start initialization failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  await store.incrementStartCount(budgetPk).catch((error) => console.error("Failed to increment start count", error));
+  if (options.publicNotify) {
+    try {
       const webhook = await getSecret(secretNames.notificationWebhookUrl);
       await postWebhook(
         webhook,
         `ASA server start requested by <@${userId ?? "unknown"}>.\nMap: ${options.map}\nTTL: ${options.durationHours}h\nStatus: STARTING`,
       );
+    } catch (error) {
+      console.error("Failed to post start notification", error);
     }
-    return message(`ASA start requested.\nMap: ${options.map}\nAuto-stop: ${expiresAt.toISOString()}`, true);
-  } catch (error) {
-    await store.updateServerStatus("ERROR", { lastStopReason: error instanceof Error ? error.message : String(error) });
-    throw error;
   }
+  return message(`ASA start requested.\nMap: ${options.map}\nAuto-stop: ${expiresAt.toISOString()}`, true);
 }
 
 async function handleStop(interaction: DiscordInteraction) {
   const state = await store.getServer();
+  if (isStaleStarting(state, new Date())) {
+    await store.updateServerStatus("STOPPED", { lastStopReason: "STALE_START_RESET" });
+    return message("Stale STARTING state was reset. No ECS task was running.", true);
+  }
   if (!state?.taskArn || (state.status !== "RUNNING" && state.status !== "STARTING")) {
     return message("ASA server is not running.", true);
   }
@@ -207,6 +281,7 @@ async function handleStop(interaction: DiscordInteraction) {
 async function handleStatus() {
   const state = await store.getServer();
   const budget = await store.getBudget(monthKey());
+  const runtimeSeconds = budget?.runtimeSeconds ?? 0;
   if (!state) return message("Status: STOPPED\nThis month: 0h", true);
   return message(
     [
@@ -216,8 +291,9 @@ async function handleStatus() {
       `Started: ${state.startedAt ?? "N/A"}`,
       `Expires: ${state.expiresAt ?? "N/A"}`,
       `Connect: ${state.connectCommand ?? "not available"}`,
-      `This month: ${hours(budget?.runtimeSeconds ?? 0)}h / ${monthlyRuntimeHoursLimit}h`,
-      `Estimated cost: ¥${Math.round(budget?.estimatedCostJpy ?? 0)}`,
+      `This month: ${hours(runtimeSeconds)}h / ${monthlyRuntimeHoursLimit}h`,
+      `Estimated cost (conservative): ¥${Math.round(budget?.estimatedCostJpy ?? 0)}`,
+      `Estimated cost (Fargate Spot approx.): ¥${Math.round(spotCostJpy(runtimeSeconds))}`,
     ].join("\n"),
     true,
   );
@@ -241,7 +317,7 @@ async function handleBackup() {
     await s3.send(
       new PutObjectCommand({
         Bucket: bucketName,
-        Key: "runtime/backup-request.json",
+        Key: `${s3RuntimePrefix}backup-request.json`,
         Body: JSON.stringify({ requestedAt: new Date().toISOString() }),
         ContentType: "application/json",
       }),
@@ -253,11 +329,13 @@ async function handleBackup() {
 
 async function handleBudget() {
   const budget = await store.getBudget(monthKey());
+  const runtimeSeconds = budget?.runtimeSeconds ?? 0;
   return message(
     [
       `Starts: ${budget?.startCount ?? 0}`,
-      `Runtime: ${hours(budget?.runtimeSeconds ?? 0)}h / ${monthlyRuntimeHoursLimit}h`,
-      `Estimated cost: ¥${Math.round(budget?.estimatedCostJpy ?? 0)}`,
+      `Runtime: ${hours(runtimeSeconds)}h / ${monthlyRuntimeHoursLimit}h`,
+      `Estimated cost (conservative): ¥${Math.round(budget?.estimatedCostJpy ?? 0)}`,
+      `Estimated cost (Fargate Spot approx.): ¥${Math.round(spotCostJpy(runtimeSeconds))}`,
     ].join("\n"),
     true,
   );
@@ -283,9 +361,28 @@ async function routeCommand(interaction: DiscordInteraction) {
   }
 }
 
-export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> {
+async function handleAsyncCommand(event: AsyncCommandEvent): Promise<void> {
+  try {
+    const result = await routeCommand(event.interaction);
+    await postInteractionFollowup(event.interaction, result.data.content, result.data.flags === EPHEMERAL);
+  } catch (error) {
+    console.error(error);
+    await postInteractionFollowup(event.interaction, `Command failed: ${error instanceof Error ? error.message : String(error)}`, true);
+  }
+}
+
+export async function handler(event: APIGatewayProxyEventV2 | AsyncCommandEvent): Promise<APIGatewayProxyStructuredResultV2 | undefined> {
+  if (isAsyncCommandEvent(event)) {
+    await handleAsyncCommand(event);
+    return undefined;
+  }
   const body = rawBody(event);
-  const publicKey = await getParameter(parameterNames.discordPublicKey);
+  const [publicKey, guildId, allowedUsers, allowedRoles] = await Promise.all([
+    getParameter(parameterNames.discordPublicKey),
+    getParameter(parameterNames.discordGuildId),
+    getJsonArrayParameter(parameterNames.allowedUserIds),
+    getJsonArrayParameter(parameterNames.allowedRoleIds),
+  ]);
   const signatureOk = verifyDiscordSignature({
     publicKey,
     signature: event.headers["x-signature-ed25519"] ?? event.headers["X-Signature-Ed25519"],
@@ -299,16 +396,20 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     return response(200, { type: InteractionResponseType.Pong });
   }
 
-  const guildId = await getParameter(parameterNames.discordGuildId);
   if (interaction.guild_id !== guildId) return response(200, message("This command is not available in this guild.", true));
 
-  const allowedUsers = await getJsonArrayParameter(parameterNames.allowedUserIds);
-  const allowedRoles = await getJsonArrayParameter(parameterNames.allowedRoleIds);
   if (!isAuthorized(interaction, allowedUsers, allowedRoles))
     return response(200, message("You are not allowed to operate the ASA server.", true));
 
   try {
-    return response(200, await routeCommand(interaction));
+    await lambda.send(
+      new InvokeCommand({
+        FunctionName: functionName,
+        InvocationType: "Event",
+        Payload: Buffer.from(JSON.stringify({ source: "asa.discord.command", interaction } satisfies AsyncCommandEvent)),
+      }),
+    );
+    return response(200, deferred(true));
   } catch (error) {
     console.error(error);
     return response(200, message(`Command failed: ${error instanceof Error ? error.message : String(error)}`, true));

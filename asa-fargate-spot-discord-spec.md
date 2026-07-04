@@ -61,6 +61,7 @@ SteamDB 上では `ARK: Survival Ascended Dedicated Server` は `Supported Syste
 - ALB / NLB。
 - EFS 常用。
 - 複数マップ同時起動。
+- クラスタ転送データは S3 backup 経由で次回起動するマップへ引き継ぐ。
 - 大規模公開サーバー。
 - RCON の外部公開。
 - 完全なコスト上限保証。
@@ -107,7 +108,6 @@ Inbound:
 |---|---:|---|---|
 | UDP | 7777 | `0.0.0.0/0` | ASA game port |
 | UDP | 7778 | `0.0.0.0/0` | ASA raw/socket adjacent port |
-| UDP | 27015 | `0.0.0.0/0` | Steam query port |
 
 Outbound:
 
@@ -139,7 +139,7 @@ Launch type:
 | Parameter | Value |
 |---|---:|
 | CPU | `2048` |
-| Memory | `12288 MiB` |
+| Memory | `16384 MiB` |
 | Ephemeral storage | `100 GiB` |
 | stopTimeout | `120 seconds` |
 | desiredCount | N/A; serviceを作らない |
@@ -149,7 +149,7 @@ CDK context で上書き可能にする。
 ```json
 {
   "asaCpu": 2048,
-  "asaMemoryMiB": 12288,
+  "asaMemoryMiB": 16384,
   "asaEphemeralStorageGiB": 100,
   "asaStopTimeoutSeconds": 120
 }
@@ -571,7 +571,15 @@ Options:
     "type": 3,
     "required": false,
     "choices": [
-      { "name": "The Island", "value": "TheIsland_WP" }
+      { "name": "The Island", "value": "TheIsland_WP" },
+      { "name": "Scorched Earth", "value": "ScorchedEarth_WP" },
+      { "name": "The Center", "value": "TheCenter_WP" },
+      { "name": "Aberration", "value": "Aberration_WP" },
+      { "name": "Extinction", "value": "Extinction_WP" },
+      { "name": "Astraeos", "value": "Astraeos_WP" },
+      { "name": "Ragnarok", "value": "Ragnarok_WP" },
+      { "name": "Valguero", "value": "Valguero_WP" },
+      { "name": "Lost Colony", "value": "LostColony_WP" }
     ]
   },
   {
@@ -743,8 +751,8 @@ ASA_MAX_PLAYERS=4
 ASA_SERVER_PASSWORD=<secret>
 ASA_ADMIN_PASSWORD=<secret>
 ASA_PORT=7777
-ASA_QUERY_PORT=27015
 ASA_RCON_PORT=27020
+ASA_CLUSTER_ID=asa-on-demand
 ASA_DISABLE_BATTLEYE=true
 DISCORD_WEBHOOK_URL=<secret>
 AUTO_BACKUP_INTERVAL_SECONDS=600
@@ -791,8 +799,10 @@ steamcmd \
 
 ```bash
 ArkAscendedServer.exe \
-  "${ASA_MAP}?listen?SessionName=${ASA_SESSION_NAME}?ServerPassword=${ASA_SERVER_PASSWORD}?ServerAdminPassword=${ASA_ADMIN_PASSWORD}?MaxPlayers=${ASA_MAX_PLAYERS}?Port=${ASA_PORT}?QueryPort=${ASA_QUERY_PORT}" \
-  -log
+  "${ASA_MAP}?listen?SessionName=${ASA_SESSION_NAME}?ServerPassword=${ASA_SERVER_PASSWORD}?ServerAdminPassword=${ASA_ADMIN_PASSWORD}?MaxPlayers=${ASA_MAX_PLAYERS}?Port=${ASA_PORT}?RCONEnabled=True?RCONPort=${ASA_RCON_PORT}" \
+  -log \
+  "-clusterid=${ASA_CLUSTER_ID}" \
+  "-ClusterDirOverride=Z:\\asa\\server\\ShooterGame\\Saved\\clusters"
 ```
 
 `ASA_DISABLE_BATTLEYE=true` の場合は `-NoBattlEye` を追加する。
@@ -801,20 +811,23 @@ ArkAscendedServer.exe \
 
 ## 6.5 Ready判定
 
-以下のいずれかで READY とみなす。
-
-優先順位:
-
-1. RCON 接続が成功する。
-2. UDP query port が応答する。
-3. server log に ready 相当の行が出る。
-
-初期実装では RCON 成功を第一候補にする。
-RCON が安定しない場合は log pattern に fallback する。
+localhost の RCON TCP port への接続が成功したら READY とみなす。
+RCON が安定しない場合は server log pattern への fallback を検討する。
 
 READY になったら Discord webhook に投稿する。
 
-## 6.6 Backup
+## 6.6 非同期クラスタ転送
+
+- 転送対象は同一スタック、同一 `resourcePrefix` で順番に起動するマップに限定する。
+- 異なる `resourcePrefix` のスタック間転送は非対応とする。`ASA_CLUSTER_ID` を揃えても S3 bucket と save archive を共有しないため転送できない。
+- 同時に起動するマップは1つだけとする。
+- 全マップで同じ `ASA_CLUSTER_ID` を使用する。
+- 転送データは `ShooterGame/Saved/clusters/<cluster-id>` に保存する。
+- backup は `Saved` 全体を archive するため、転送データも `saves/current.tar.zst` に含まれる。
+- 別マップ起動時に同じ archive を復元し、アップロード済み survivor、creature、item を download 可能にする。
+- 確実に引き継ぐ場合は転送操作後に `/asa backup` を完了させてから停止する。
+
+## 6.7 Backup
 
 `backup.sh`:
 
@@ -833,7 +846,7 @@ aws s3 cp /asa/tmp/current.tar.zst "s3://${S3_BUCKET}/saves/current.tar.zst"
 aws s3 cp /asa/tmp/current.tar.zst "s3://${S3_BUCKET}/backups/$(date -u +%Y/%m/%d/%Y%m%dT%H%M%SZ).tar.zst"
 ```
 
-## 6.7 SIGTERM handling
+## 6.8 SIGTERM handling
 
 `entrypoint.sh` は SIGTERM / SIGINT を trap する。
 
@@ -1249,7 +1262,7 @@ Retention:
 - EC2 Instance / AutoScalingGroup が作られていない。
 - NAT Gateway が作られていない。
 - ALB / NLB が作られていない。
-- Security Group inbound が UDP 7777, 7778, 27015 のみ。
+- Security Group inbound が UDP 7777, 7778 のみ。
 - TaskDefinition が Fargate Linux x86_64。
 - Ephemeral storage が context 通り。
 - stopTimeout が 120 秒。

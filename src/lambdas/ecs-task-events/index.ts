@@ -5,7 +5,7 @@ import type { EventBridgeEvent } from "aws-lambda";
 import { monthKey } from "../../shared/budget.js";
 import { getSecret, requireEnv } from "../../shared/config.js";
 import { postWebhook } from "../../shared/discord.js";
-import { connectCommandForIp, eniIdFromTask } from "../../shared/ecs.js";
+import { connectCommandForIp, eniIdFromTask, taskStopReason } from "../../shared/ecs.js";
 import { StateStore } from "../../shared/state.js";
 
 interface EcsTaskStateChangeDetail {
@@ -14,6 +14,8 @@ interface EcsTaskStateChangeDetail {
   lastStatus: string;
   desiredStatus?: string;
   stoppedReason?: string;
+  startedAt?: string;
+  stoppedAt?: string;
   containers?: Array<{ name?: string; lastStatus?: string; exitCode?: number; reason?: string }>;
 }
 
@@ -26,6 +28,8 @@ const clusterArn = requireEnv("CLUSTER_ARN");
 const webhookSecretName = requireEnv("NOTIFICATION_WEBHOOK_SECRET_NAME");
 const domainName = process.env.DOMAIN_NAME || undefined;
 const hostedZoneId = process.env.HOSTED_ZONE_ID || undefined;
+const hourlyCostJpy = Number(process.env.HOURLY_COST_JPY ?? "52");
+const jpyPerUsd = Number(process.env.JPY_PER_USD ?? "150");
 
 async function resolvePublicIp(taskArn: string): Promise<string | undefined> {
   const tasks = await ecs.send(new DescribeTasksCommand({ cluster: clusterArn, tasks: [taskArn] }));
@@ -68,8 +72,8 @@ function runtimeSeconds(startedAt: string | null | undefined, stoppedAt: Date): 
 
 function estimateCost(runtime: number): { jpy: number; usd: number } {
   const hours = runtime / 3600;
-  const jpy = hours * 18.75;
-  const usd = jpy / 150;
+  const jpy = hours * hourlyCostJpy;
+  const usd = jpy / jpyPerUsd;
   return { jpy, usd };
 }
 
@@ -102,15 +106,22 @@ export async function handler(event: EventBridgeEvent<"ECS Task State Change", E
   if (detail.lastStatus === "STOPPED") {
     const now = new Date();
     const state = await store.getServer();
-    const runtime = runtimeSeconds(state?.startedAt, now);
+    const stoppedAt = detail.stoppedAt ? new Date(detail.stoppedAt) : now;
+    const runtime = runtimeSeconds(detail.startedAt ?? state?.startedAt, stoppedAt);
     const estimated = estimateCost(runtime);
-    await store.addRuntimeToBudget(monthKey(now), runtime, estimated.jpy, estimated.usd);
-    await store.updateServerStatus("STOPPED", {
-      taskArn: null,
-      publicIp: null,
-      connectCommand: null,
-      lastStopReason: detail.stoppedReason ?? "STOPPED",
+    const reason = taskStopReason(detail.stoppedReason, detail.containers);
+    const settled = await store.settleStoppedTask({
+      taskArn: detail.taskArn,
+      budgetPk: monthKey(stoppedAt),
+      runtimeSeconds: runtime,
+      estimatedCostJpy: estimated.jpy,
+      estimatedCostUsd: estimated.usd,
+      reason,
     });
+    if (!settled) {
+      console.log(`Ignoring duplicate or stale STOPPED event for ${detail.taskArn}`);
+      return;
+    }
     const unexpected = state?.status !== "STOPPING" && detail.stoppedReason && !detail.stoppedReason.includes("USER_REQUEST");
     await postWebhook(
       webhook,
@@ -118,7 +129,7 @@ export async function handler(event: EventBridgeEvent<"ECS Task State Change", E
         unexpected ? "ASA server stopped unexpectedly or was interrupted." : "ASA server stopped.",
         `Runtime: ${Math.floor(runtime / 3600)}h ${Math.floor((runtime % 3600) / 60)}m`,
         `Last backup: ${state?.lastBackupAt ?? "unknown"}`,
-        `Reason: ${detail.stoppedReason ?? "unknown"}`,
+        `Reason: ${reason}`,
       ].join("\n"),
     );
   }

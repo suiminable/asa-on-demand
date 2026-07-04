@@ -14,8 +14,8 @@ required=(
   ASA_SERVER_PASSWORD
   ASA_ADMIN_PASSWORD
   ASA_PORT
-  ASA_QUERY_PORT
   ASA_RCON_PORT
+  ASA_CLUSTER_ID
 )
 
 for name in "${required[@]}"; do
@@ -29,6 +29,10 @@ if [[ ! "${ASA_SESSION_NAME}" =~ ^[A-Za-z0-9_.-]{1,64}$ ]]; then
   echo "ASA_SESSION_NAME contains unsupported characters." >&2
   exit 2
 fi
+if [[ ! "${ASA_CLUSTER_ID}" =~ ^[A-Za-z0-9_.-]{1,64}$ ]]; then
+  echo "ASA_CLUSTER_ID contains unsupported characters." >&2
+  exit 2
+fi
 
 mkdir -p /asa/server /asa/work /asa/tmp /asa/scripts
 
@@ -38,11 +42,13 @@ request_loop_pid=""
 stopping="false"
 
 notify() {
-  /asa/scripts/notify-discord.sh "$1" || true
+  local content
+  content="$(printf '%b' "$1")"
+  /asa/scripts/notify-discord.sh "${content}" || true
 }
 
 run_backup() {
-  /asa/scripts/backup.sh || notify "ASA backup failed at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+  SKIP_RCON_SAVE="${1:-false}" /asa/scripts/backup.sh || notify "ASA backup failed at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
 }
 
 stop_background_loops() {
@@ -55,23 +61,34 @@ shutdown() {
   stopping="true"
   notify "ASA server is stopping. Saving world and uploading final backup..."
   stop_background_loops
-  run_backup
   if [[ -n "${asa_pid}" ]]; then
-    kill -TERM "${asa_pid}" 2>/dev/null || true
+    /asa/scripts/rcon.py SaveWorld || true
+    sleep "${BACKUP_SAVE_DELAY_SECONDS:-8}"
+    /asa/scripts/rcon.py DoExit || kill -TERM "${asa_pid}" 2>/dev/null || true
     for _ in $(seq 1 30); do
-      if ! kill -0 "${asa_pid}" 2>/dev/null; then return; fi
+      if ! kill -0 "${asa_pid}" 2>/dev/null; then break; fi
       sleep 1
     done
+    if kill -0 "${asa_pid}" 2>/dev/null; then
+      kill -TERM "${asa_pid}" 2>/dev/null || true
+      sleep 5
+    fi
     kill -KILL "${asa_pid}" 2>/dev/null || true
   fi
+  run_backup true
 }
 
 trap shutdown SIGTERM SIGINT
 
-echo "Updating ASA dedicated server with SteamCMD..."
-steamcmd +force_install_dir "${ASA_INSTALL_DIR}" +login anonymous +app_update "${ASA_APP_ID}" validate +quit
+if [[ "${ASA_UPDATE_ON_START:-false}" == "true" ]]; then
+  echo "Updating ASA dedicated server with SteamCMD..."
+  steamcmd +force_install_dir "${ASA_INSTALL_DIR}" +login anonymous +app_update "${ASA_APP_ID}" validate +quit
+else
+  echo "Using ASA dedicated server bundled in the container image."
+fi
 
 /asa/scripts/restore.sh
+/asa/scripts/configure-server.py
 
 server_exe="${ASA_INSTALL_DIR}/ShooterGame/Binaries/Win64/ArkAscendedServer.exe"
 if [[ ! -f "${server_exe}" ]]; then
@@ -79,13 +96,28 @@ if [[ ! -f "${server_exe}" ]]; then
   exit 1
 fi
 
-launch_arg="${ASA_MAP}?listen?SessionName=${ASA_SESSION_NAME}?ServerPassword=${ASA_SERVER_PASSWORD}?ServerAdminPassword=${ASA_ADMIN_PASSWORD}?MaxPlayers=${ASA_MAX_PLAYERS}?Port=${ASA_PORT}?QueryPort=${ASA_QUERY_PORT}?RCONEnabled=True?RCONPort=${ASA_RCON_PORT}"
-extra_args=(-log)
+# Steam currently ships this DLL with ASA, but it crashes when loaded through Proton.
+rm -f "${ASA_INSTALL_DIR}/ShooterGame/Binaries/Win64/steamclient64.dll"
+
+cluster_dir="${ASA_INSTALL_DIR}/ShooterGame/Saved/clusters"
+cluster_dir_windows="Z:${cluster_dir//\//\\}"
+mkdir -p "${cluster_dir}"
+
+launch_arg="${ASA_MAP}?listen?Port=${ASA_PORT}"
+extra_args=(-log "-WinLiveMaxPlayers=${ASA_MAX_PLAYERS}" "-clusterid=${ASA_CLUSTER_ID}" "-ClusterDirOverride=${cluster_dir_windows}")
 if [[ "${ASA_DISABLE_BATTLEYE:-true}" == "true" ]]; then
   extra_args+=(-NoBattlEye)
 fi
 
-if command -v umu-run >/dev/null 2>&1; then
+if [[ -x "${PROTONPATH:-}/proton" ]]; then
+  export STEAM_COMPAT_CLIENT_INSTALL_PATH="${STEAM_COMPAT_CLIENT_INSTALL_PATH:-/home/asa/.local/share/Steam}"
+  export STEAM_COMPAT_DATA_PATH="${STEAM_COMPAT_DATA_PATH:-${WINEPREFIX}}"
+  export STEAM_COMPAT_INSTALL_PATH="${STEAM_COMPAT_INSTALL_PATH:-${ASA_INSTALL_DIR}}"
+  export SteamAppId="${ASA_APP_ID}"
+  export SteamGameId="${ASA_APP_ID}"
+  mkdir -p "${STEAM_COMPAT_CLIENT_INSTALL_PATH}" "${STEAM_COMPAT_DATA_PATH}"
+  launcher=("${PROTONPATH}/proton" run "${server_exe}")
+elif command -v umu-run >/dev/null 2>&1; then
   launcher=(umu-run "${server_exe}")
 elif command -v proton >/dev/null 2>&1; then
   launcher=(proton run "${server_exe}")
@@ -124,7 +156,7 @@ request_loop_pid="$!"
 
 (
   for _ in $(seq 1 120); do
-    if nc -z -u -w1 127.0.0.1 "${ASA_QUERY_PORT}" >/dev/null 2>&1; then
+    if nc -z -w1 127.0.0.1 "${ASA_RCON_PORT}" >/dev/null 2>&1; then
       notify "ASA server is READY.\nServer: ${ASA_SESSION_NAME}\nMap: ${ASA_MAP}\nAuto-stop: ${ASA_EXPIRES_AT:-unknown}"
       exit 0
     fi
@@ -133,8 +165,7 @@ request_loop_pid="$!"
   notify "ASA server did not pass the ready check within the expected window. It may still finish loading."
 ) &
 
-wait "${asa_pid}"
-exit_code="$?"
+exit_code=0
+wait "${asa_pid}" || exit_code="$?"
 stop_background_loops
 exit "${exit_code}"
-

@@ -15,6 +15,6 @@ template.resourceCountIs("AWS::EC2::NatGateway", 0);
 template.resourceCountIs("AWS::ElasticLoadBalancingV2::LoadBalancer", 0);
 template.resourcePropertiesCountIs("AWS::EC2::SecurityGroupIngress", { IpProtocol: "udp", FromPort: 7777, ToPort: 7777 }, 1);
 template.resourcePropertiesCountIs("AWS::EC2::SecurityGroupIngress", { IpProtocol: "udp", FromPort: 7778, ToPort: 7778 }, 1);
-template.resourcePropertiesCountIs("AWS::EC2::SecurityGroupIngress", { IpProtocol: "udp", FromPort: 27015, ToPort: 27015 }, 1);
+template.resourceCountIs("AWS::EC2::SecurityGroupIngress", 2);
 
 console.log("Smoke synth assertions passed.");

@@ -21,6 +21,7 @@
     "@aws-sdk/client-dynamodb": "^3.614.0",
     "@aws-sdk/client-ec2": "^3.614.0",
     "@aws-sdk/client-ecs": "^3.614.0",
+    "@aws-sdk/client-lambda": "^3.1075.0",
     "@aws-sdk/client-route-53": "^3.614.0",
     "@aws-sdk/client-s3": "^3.614.0",
     "@aws-sdk/client-scheduler": "^3.614.0",
