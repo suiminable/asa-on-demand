@@ -84,8 +84,8 @@ RUN su -s /bin/bash asa -c 'mkdir -p /home/asa/.local/share/Steam \
     SteamAppId=2430930 SteamGameId=2430930 \
     && "$PROTONPATH/proton" run "$PROTONPATH/files/lib/wine/x86_64-windows/cmd.exe" /c exit'
 
-COPY entrypoint.sh backup.sh restore.sh notify-discord.sh healthcheck.sh /asa/scripts/
-RUN chmod +x /asa/scripts/*.sh
+COPY entrypoint.sh backup.sh restore.sh notify-discord.sh healthcheck.sh rcon.py configure-server.py /asa/scripts/
+RUN chmod +x /asa/scripts/*.sh /asa/scripts/*.py
 
 WORKDIR /asa
 USER asa

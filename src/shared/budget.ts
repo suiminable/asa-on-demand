@@ -1,7 +1,15 @@
 import type { BudgetState } from "./types.js";
 
 export function monthKey(now = new Date()): string {
-  return `BUDGET#${now.toISOString().slice(0, 7)}`;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(now);
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  if (!year || !month) throw new Error("Failed to format the JST budget month.");
+  return `BUDGET#${year}-${month}`;
 }
 
 export function hours(seconds: number): number {

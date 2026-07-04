@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as cdk from "aws-cdk-lib";
@@ -19,6 +20,7 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import type { Construct } from "constructs";
 import { normalizeConfigPrefix, parameterNamesFor, secretNamesFor } from "../shared/config.js";
+import { DEFAULT_SESSION_HOURS, MAX_SESSION_HOURS } from "../shared/defaults.js";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(dirname, "../..");
@@ -51,7 +53,7 @@ function stringContext(scope: Construct, name: string, defaultValue = ""): strin
 function normalizeS3Prefix(prefix: string): string {
   const trimmed = prefix.trim().replace(/^\/+|\/+$/g, "");
   if (!trimmed) return "";
-  if (!/^[A-Za-z0-9_.\/-]+$/.test(trimmed)) {
+  if (!/^[A-Za-z0-9_./-]+$/.test(trimmed)) {
     throw new Error("Context resourcePrefix must contain only letters, numbers, slash, dot, underscore, or hyphen.");
   }
   return `${trimmed}/`;
@@ -86,24 +88,34 @@ export class AsaFargateStack extends cdk.Stack {
     const region = this.node.tryGetContext("region") ?? cdk.Stack.of(this).region;
     const resourcePrefix = normalizeS3Prefix(stringContext(this, "resourcePrefix"));
     const resourceNameSegment = resourcePrefix ? normalizeNameSegment(resourcePrefix) : "";
+    const environmentId = resourcePrefix || "default";
+    const environmentHash = createHash("sha256").update(environmentId).digest("hex").slice(0, 8);
+    const discordFunctionName = `asa-${(resourceNameSegment || "default").slice(0, 42)}-discord-${environmentHash}`;
     const configPrefix = normalizeConfigPrefix(resourcePrefix ? `/asa/${resourcePrefix}` : "/asa");
     const parameterNames = parameterNamesFor(configPrefix);
     const secretNames = secretNamesFor(configPrefix);
     const cpu = numberContext(this, { name: "asaCpu", defaultValue: 2048 });
-    const memoryMiB = numberContext(this, { name: "asaMemoryMiB", defaultValue: 12288 });
+    const memoryMiB = numberContext(this, { name: "asaMemoryMiB", defaultValue: 16384 });
     const ephemeralStorageGiB = numberContext(this, { name: "asaEphemeralStorageGiB", defaultValue: 100 });
     const stopTimeoutSeconds = numberContext(this, { name: "asaStopTimeoutSeconds", defaultValue: 120 });
-    const defaultSessionHours = numberContext(this, { name: "defaultSessionHours", defaultValue: 4 });
-    const maxSessionHours = numberContext(this, { name: "maxSessionHours", defaultValue: 8 });
+    const defaultSessionHours = numberContext(this, { name: "defaultSessionHours", defaultValue: DEFAULT_SESSION_HOURS });
+    const maxSessionHours = numberContext(this, { name: "maxSessionHours", defaultValue: MAX_SESSION_HOURS });
     const monthlyBudgetJpy = numberContext(this, { name: "monthlyBudgetJpy", defaultValue: 1500 });
+    const hourlyCostJpy = numberContext(this, { name: "hourlyCostJpy", defaultValue: 18.75 });
+    const jpyPerUsd = numberContext(this, { name: "jpyPerUsd", defaultValue: 150 });
     const monthlyRuntimeHoursLimit = numberContext(this, { name: "monthlyRuntimeHoursLimit", defaultValue: 80 });
     const enableOnDemandFallback = booleanContext(this, "enableOnDemandFallback", false);
     const allowDiscordPasswordNotification = booleanContext(this, "allowDiscordPasswordNotification", false);
     const asaBuildId = stringContext(this, "asaBuildId") || "initial";
     const asaUpdateOnStart = booleanContext(this, "asaUpdateOnStart", false);
+    const asaClusterId = stringContext(this, "asaClusterId") || resourceNameSegment || "asa-on-demand";
+    if (!/^[A-Za-z0-9_.-]{1,64}$/.test(asaClusterId)) {
+      throw new Error("Context asaClusterId must contain only letters, numbers, dot, underscore, or hyphen.");
+    }
     const enableAwsBudget = booleanContext(this, "enableAwsBudget", false);
     const budgetEmail = this.node.tryGetContext("budgetEmail") as string | undefined;
     const hostedZoneId = this.node.tryGetContext("hostedZoneId") as string | undefined;
+    const hostedZoneName = this.node.tryGetContext("hostedZoneName") as string | undefined;
     const domainName = this.node.tryGetContext("domainName") as string | undefined;
     const vpc = new ec2.Vpc(this, "AsaVpc", {
       maxAzs: 2,
@@ -182,6 +194,13 @@ export class AsaFargateStack extends cdk.Stack {
       image: ecs.ContainerImage.fromDockerImageAsset(imageAsset),
       essential: true,
       stopTimeout: cdk.Duration.seconds(stopTimeoutSeconds),
+      healthCheck: {
+        command: ["CMD-SHELL", "/asa/scripts/healthcheck.sh"],
+        interval: cdk.Duration.seconds(30),
+        timeout: cdk.Duration.seconds(5),
+        retries: 3,
+        startPeriod: cdk.Duration.minutes(10),
+      },
       logging: ecs.LogDrivers.awsLogs({
         logGroup: ecsLogGroup,
         streamPrefix: "asa",
@@ -204,6 +223,7 @@ export class AsaFargateStack extends cdk.Stack {
         ASA_MAX_PLAYERS: "4",
         ASA_PORT: "7777",
         ASA_RCON_PORT: "27020",
+        ASA_CLUSTER_ID: asaClusterId,
         ASA_DISABLE_BATTLEYE: "true",
         ASA_UPDATE_ON_START: String(asaUpdateOnStart),
         AUTO_BACKUP_INTERVAL_SECONDS: "600",
@@ -296,6 +316,8 @@ export class AsaFargateStack extends cdk.Stack {
       MAX_SESSION_HOURS: String(maxSessionHours),
       MONTHLY_RUNTIME_HOURS_LIMIT: String(monthlyRuntimeHoursLimit),
       MONTHLY_BUDGET_JPY: String(monthlyBudgetJpy),
+      HOURLY_COST_JPY: String(hourlyCostJpy),
+      JPY_PER_USD: String(jpyPerUsd),
       ENABLE_ON_DEMAND_FALLBACK: String(enableOnDemandFallback),
       ALLOW_DISCORD_PASSWORD_NOTIFICATION: String(allowDiscordPasswordNotification),
       DOMAIN_NAME: domainName ?? "",
@@ -308,10 +330,17 @@ export class AsaFargateStack extends cdk.Stack {
     });
     const discordInteractions = new lambdaNodejs.NodejsFunction(this, "DiscordInteractionLambda", {
       ...lambdaDefaults,
+      functionName: discordFunctionName,
       entry: path.join(rootDir, "src/lambdas/discord-interactions/index.ts"),
       logGroup: discordInteractionsLogGroup,
       environment: commonEnvironment,
     });
+    discordInteractions.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["lambda:InvokeFunction"],
+        resources: [this.formatArn({ service: "lambda", resource: "function", resourceName: discordFunctionName })],
+      }),
+    );
 
     const ecsTaskEventsLogGroup = new logs.LogGroup(this, "EcsTaskEventsLogGroup", {
       logGroupName: prefixedLogGroupName(resourceNameSegment, "lambda/ecs-task-events"),
@@ -445,9 +474,10 @@ export class AsaFargateStack extends cdk.Stack {
     }
 
     if (hostedZoneId && domainName) {
+      if (!hostedZoneName) throw new Error("hostedZoneName context is required with hostedZoneId and domainName.");
       const zone = route53.HostedZone.fromHostedZoneAttributes(this, "AsaHostedZone", {
         hostedZoneId,
-        zoneName: domainName.split(".").slice(1).join("."),
+        zoneName: hostedZoneName,
       });
       ecsTaskEvents.addToRolePolicy(
         new iam.PolicyStatement({
@@ -465,8 +495,8 @@ export class AsaFargateStack extends cdk.Stack {
           budgetType: "COST",
           timeUnit: "MONTHLY",
           budgetLimit: {
-            amount: monthlyBudgetJpy,
-            unit: "JPY",
+            amount: monthlyBudgetJpy / jpyPerUsd,
+            unit: "USD",
           },
         },
         notificationsWithSubscribers: [

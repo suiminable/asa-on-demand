@@ -3,18 +3,24 @@ import { describe, expect, it } from "vitest";
 import { canStart, hours, monthKey } from "../src/shared/budget.js";
 import { normalizeConfigPrefix, parameterNamesFor, secretNamesFor } from "../src/shared/config.js";
 import { isAuthorized, verifyDiscordSignature } from "../src/shared/discord.js";
-import { connectCommandForIp, eniIdFromTask } from "../src/shared/ecs.js";
+import { connectCommandForIp, eniIdFromTask, taskStopReason } from "../src/shared/ecs.js";
+import { ASA_MAPS, isSupportedAsaMap } from "../src/shared/maps.js";
 
 describe("Discord helpers", () => {
   it("verifies valid Ed25519 signatures", () => {
     const keyPair = nacl.sign.keyPair();
     const timestamp = "1710000000";
+    const now = new Date(Number(timestamp) * 1000);
     const rawBody = JSON.stringify({ type: 1 });
     const signature = Buffer.from(nacl.sign.detached(Buffer.from(timestamp + rawBody), keyPair.secretKey)).toString("hex");
     const publicKey = Buffer.from(keyPair.publicKey).toString("hex");
 
-    expect(verifyDiscordSignature({ publicKey, signature, timestamp, rawBody })).toBe(true);
-    expect(verifyDiscordSignature({ publicKey, signature, timestamp, rawBody: "{}" })).toBe(false);
+    expect(verifyDiscordSignature({ publicKey, signature, timestamp, rawBody, now })).toBe(true);
+    expect(verifyDiscordSignature({ publicKey, signature, timestamp, rawBody: "{}", now })).toBe(false);
+    expect(verifyDiscordSignature({ publicKey, signature: "not-hex", timestamp, rawBody, now })).toBe(false);
+    expect(verifyDiscordSignature({ publicKey, signature, timestamp, rawBody, now: new Date((Number(timestamp) + 301) * 1000) })).toBe(
+      false,
+    );
   });
 
   it("authorizes by allowed user or role", () => {
@@ -27,6 +33,7 @@ describe("Discord helpers", () => {
 describe("Budget helpers", () => {
   it("formats monthly keys and hours", () => {
     expect(monthKey(new Date("2026-06-24T00:00:00Z"))).toBe("BUDGET#2026-06");
+    expect(monthKey(new Date("2026-06-30T15:00:00Z"))).toBe("BUDGET#2026-07");
     expect(hours(3660)).toBe(1);
     expect(hours(5400)).toBe(1.5);
   });
@@ -62,6 +69,13 @@ describe("ECS helpers", () => {
     expect(connectCommandForIp("203.0.113.10", "ark.example.com")).toBe("open ark.example.com:7777");
     expect(connectCommandForIp(undefined)).toBeNull();
   });
+
+  it("includes container failures in task stop reasons", () => {
+    expect(taskStopReason("Essential container in task exited", [{ reason: "OutOfMemoryError" }])).toBe(
+      "Essential container in task exited: OutOfMemoryError",
+    );
+    expect(taskStopReason(undefined, undefined)).toBe("unknown");
+  });
 });
 
 describe("Config helpers", () => {
@@ -69,5 +83,13 @@ describe("Config helpers", () => {
     expect(normalizeConfigPrefix(" /asa/maps/the-island/ ")).toBe("/asa/maps/the-island");
     expect(parameterNamesFor("/asa/maps/the-island").defaultMap).toBe("/asa/maps/the-island/server/default-map");
     expect(secretNamesFor("/asa/maps/the-island").serverPassword).toBe("/asa/maps/the-island/server/password");
+  });
+});
+
+describe("ASA maps", () => {
+  it("keeps Discord choices and server validation on the same allowlist", () => {
+    expect(ASA_MAPS).toContainEqual({ name: "The Island", value: "TheIsland_WP" });
+    expect(isSupportedAsaMap("Ragnarok_WP")).toBe(true);
+    expect(isSupportedAsaMap("Genesis2_WP")).toBe(false);
   });
 });

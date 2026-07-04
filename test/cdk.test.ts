@@ -35,7 +35,7 @@ describe("AsaFargateStack", () => {
     template.hasResourceProperties("AWS::ECS::TaskDefinition", {
       RequiresCompatibilities: ["FARGATE"],
       Cpu: "2048",
-      Memory: "12288",
+      Memory: "16384",
       EphemeralStorage: { SizeInGiB: 100 },
       RuntimePlatform: {
         CpuArchitecture: "X86_64",
@@ -44,9 +44,26 @@ describe("AsaFargateStack", () => {
       ContainerDefinitions: Match.arrayWith([
         Match.objectLike({
           StopTimeout: 120,
-          Environment: Match.arrayWith([{ Name: "ASA_UPDATE_ON_START", Value: "false" }]),
+          HealthCheck: {
+            Command: ["CMD-SHELL", "/asa/scripts/healthcheck.sh"],
+            Interval: 30,
+            Retries: 3,
+            StartPeriod: 600,
+            Timeout: 5,
+          },
+          Environment: Match.arrayWith([
+            { Name: "ASA_CLUSTER_ID", Value: "asa-on-demand" },
+            { Name: "ASA_UPDATE_ON_START", Value: "false" },
+          ]),
         }),
       ]),
+    });
+  });
+
+  it("creates AWS Budgets in USD", () => {
+    const template = synthTemplate({ enableAwsBudget: true, budgetEmail: "admin@example.com", monthlyBudgetJpy: 1500, jpyPerUsd: 150 });
+    template.hasResourceProperties("AWS::Budgets::Budget", {
+      Budget: Match.objectLike({ BudgetLimit: { Amount: 10, Unit: "USD" } }),
     });
   });
 

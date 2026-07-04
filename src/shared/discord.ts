@@ -19,6 +19,9 @@ export interface DiscordMember {
 }
 
 export interface DiscordInteraction {
+  id?: string;
+  application_id?: string;
+  token?: string;
   type: number;
   guild_id?: string;
   channel_id?: string;
@@ -40,12 +43,23 @@ export function verifyDiscordSignature(params: {
   signature: string | undefined;
   timestamp: string | undefined;
   rawBody: string;
+  now?: Date;
+  maxAgeSeconds?: number;
 }): boolean {
-  if (!params.signature || !params.timestamp || !params.publicKey) return false;
-  const message = Buffer.from(params.timestamp + params.rawBody);
-  const signature = Buffer.from(params.signature, "hex");
-  const publicKey = Buffer.from(params.publicKey, "hex");
-  return nacl.sign.detached.verify(message, signature, publicKey);
+  try {
+    if (!params.signature || !params.timestamp || !params.publicKey) return false;
+    if (!/^[0-9a-f]{128}$/i.test(params.signature) || !/^[0-9a-f]{64}$/i.test(params.publicKey)) return false;
+    const timestampSeconds = Number(params.timestamp);
+    if (!Number.isFinite(timestampSeconds)) return false;
+    const nowSeconds = Math.floor((params.now ?? new Date()).getTime() / 1000);
+    if (Math.abs(nowSeconds - timestampSeconds) > (params.maxAgeSeconds ?? 300)) return false;
+    const message = Buffer.from(params.timestamp + params.rawBody);
+    const signature = Buffer.from(params.signature, "hex");
+    const publicKey = Buffer.from(params.publicKey, "hex");
+    return nacl.sign.detached.verify(message, signature, publicKey);
+  } catch {
+    return false;
+  }
 }
 
 export function userIdFromInteraction(interaction: DiscordInteraction): string | undefined {
@@ -83,6 +97,16 @@ export async function postWebhook(webhookUrl: string | undefined, content: strin
   if (!response.ok) {
     throw new Error(`Discord webhook failed: ${response.status} ${await response.text()}`);
   }
+}
+
+export async function postInteractionFollowup(interaction: DiscordInteraction, content: string, ephemeral = true): Promise<void> {
+  if (!interaction.application_id || !interaction.token) throw new Error("Interaction follow-up credentials are missing.");
+  const response = await fetch(`https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ content, flags: ephemeral ? EPHEMERAL : undefined }),
+  });
+  if (!response.ok) throw new Error(`Discord interaction follow-up failed: ${response.status} ${await response.text()}`);
 }
 
 export function optionValue<T extends string | number | boolean>(interaction: DiscordInteraction, name: string): T | undefined {

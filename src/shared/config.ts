@@ -3,6 +3,8 @@ import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 
 const ssm = new SSMClient({});
 const secrets = new SecretsManagerClient({});
+const cache = new Map<string, { value: string; expiresAt: number }>();
+const cacheTtlMs = 5 * 60 * 1000;
 
 const parameterSuffixes = {
   discordApplicationId: "/discord/application-id",
@@ -47,11 +49,16 @@ export const parameterNames = parameterNamesFor();
 export const secretNames = secretNamesFor();
 
 export async function getParameter(name: string, fallback?: string): Promise<string> {
+  const cacheKey = `parameter:${name}`;
+  const cached = cache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
   try {
     const result = await ssm.send(new GetParameterCommand({ Name: name }));
-    return result.Parameter?.Value ?? fallback ?? "";
+    const value = result.Parameter?.Value ?? fallback ?? "";
+    cache.set(cacheKey, { value, expiresAt: Date.now() + cacheTtlMs });
+    return value;
   } catch (error) {
-    if (fallback !== undefined) return fallback;
+    if (fallback !== undefined && error instanceof Error && error.name === "ParameterNotFound") return fallback;
     throw error;
   }
 }
@@ -63,8 +70,13 @@ export async function getJsonArrayParameter(name: string): Promise<string[]> {
 }
 
 export async function getSecret(name: string): Promise<string> {
+  const cacheKey = `secret:${name}`;
+  const cached = cache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
   const result = await secrets.send(new GetSecretValueCommand({ SecretId: name }));
-  return result.SecretString ?? "";
+  const value = result.SecretString ?? "";
+  cache.set(cacheKey, { value, expiresAt: Date.now() + cacheTtlMs });
+  return value;
 }
 
 export function requireEnv(name: string): string {
