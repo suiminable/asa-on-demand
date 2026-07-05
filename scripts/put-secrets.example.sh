@@ -54,4 +54,6 @@ aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/discord/allowed-role-ids" --t
 aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/discord/allowed-user-ids" --type String --value '[]'
 aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/server/session-name" --type String --value 'private-asa'
 aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/server/default-map" --type String --value 'TheIsland_WP'
+# Optional: restrict selectable maps (comma-separated). Delete the parameter to allow all maps.
+# aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/server/enabled-maps" --type String --value 'TheIsland_WP,ScorchedEarth_WP'
 aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/server/max-players" --type String --value '4'

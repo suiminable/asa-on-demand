@@ -141,6 +141,10 @@ RESOURCE_PREFIX=maps/the-island ./local/put-secrets.sh --profile my-aws-profile
 - `/asa/<resourcePrefix>/server/default-map`
 - `/asa/<resourcePrefix>/server/max-players`
 
+任意の SSM パラメータ:
+
+- `/asa/<resourcePrefix>/server/enabled-maps` — `TheIsland_WP,ScorchedEarth_WP` のようなカンマ区切りのマップ値。未設定なら共有許可リストの全マップを有効にする。SSM の String パラメータには空文字を設定できないため、制限を解除する場合はこのパラメータを削除する。変更または削除した後は `pnpm run discord:register` を再実行する。
+
 プレフィックスなしのデフォルト環境では `resourcePrefix` を省略し、`/asa/discord/bot-token`、`/asa/server/default-map` のようになる。`resourcePrefix=maps/the-island` の場合は `/asa/maps/the-island/discord/bot-token`、`/asa/maps/the-island/server/default-map` のようになる。
 
 ## Discord
@@ -155,7 +159,7 @@ pnpm run discord:register \
   --resourcePrefix maps/the-island
 ```
 
-このスクリプトは bot トークンを Secrets Manager から、アプリケーション ID とギルド ID を SSM から読み込む。従来どおり `DISCORD_BOT_TOKEN`、`DISCORD_APPLICATION_ID`、`DISCORD_GUILD_ID` の環境変数で上書きもできる。
+このスクリプトは bot トークンを Secrets Manager から、アプリケーション ID・ギルド ID と任意のマップ制限を SSM の `server/enabled-maps` から読み込む。従来どおり `DISCORD_BOT_TOKEN`、`DISCORD_APPLICATION_ID`、`DISCORD_GUILD_ID`、`ASA_ENABLED_MAPS` の環境変数で上書きもできる。
 デフォルト以外の `-c maxSessionHours=<hours>` でデプロイする場合は、コマンド登録時にも同じ値を `--maxSessionHours <hours>` で渡す。
 
 ## よく使うコマンド
@@ -175,10 +179,11 @@ pnpm run image:push --profile my-aws-profile
 - キャパシティプロバイダ戦略のデフォルトは Fargate Spot。`-c enableOnDemandFallback=true` を指定しない限りオンデマンドへのフォールバックは無効。
 - タスクサイズのデフォルトは 4 vCPU・24 GiB メモリ。
 - Discord の budget 出力は、保守的な見積もり(`hourlyCostJpy`、デフォルト 52 円/時)と Fargate Spot の変動見積もり(`spotHourlyCostJpy`、デフォルト 17 円/時)の両方を表示する。
+- `/asa start` のデフォルトは 8 時間で、`duration_hours` には 1〜48 を指定できる。`monthlyRuntimeHoursLimit`(デフォルト 80 時間)の残りが 48 時間未満ならランタイム制限により 48 時間の起動は拒否されるため、その場合は短い時間を指定する。Spot のデフォルト見積もりでは 8 時間は約 136 円、48 時間は約 816 円。`monthlyBudgetJpy` のデフォルトは 1,500 円のままとする。
 - ASA と UMU-Proton は `scripts/push-image.sh` の Docker イメージビルド時にインストールされる。CDK の synth / deploy は Docker を起動しない。
 - ASA のアップデートを取り込むには、まず `./scripts/push-image.sh --build-id 2026-07-05` を実行し、次に同じタグで `pnpm exec cdk deploy -c asaBuildId=2026-07-05` をデプロイする。タグが存在しない・一致しない場合、ECS タスクはイメージの pull エラーで停止する。
 - `-c asaUpdateOnStart=true` で、タスク起動のたびに SteamCMD で更新する緊急用モードを有効にできる。デフォルトは無効。
-- マップの選択肢は Lambda が検証し、共有の許可リストから登録される。リストを変更してデプロイしたら `pnpm run discord:register` を再実行する。
+- マップの選択肢は Lambda が検証し、共有の許可リストから登録される。任意の `server/enabled-maps` パラメータで環境ごとのサブセットに制限できる。共有リストまたはこのパラメータを変更したら `pnpm run discord:register` を再実行する。
 - 1 スタック内のマップ間転送は非同期方式: クラスターデータはそのスタックの S3 セーブアーカイブに含まれるが、複数マップを同時には動かさない。クロススタック転送はサポートしない。
 - Discord コマンドは即座に deferred 応答を返し、AWS 操作を非同期に実行して、結果を follow-up 応答で返す。準備完了やライフサイクルの通知は設定した Discord webhook に送られる。
 - ステートバケットはバージョニング有効で、非カレントのオブジェクトバージョンはライフサイクルルールにより 7 日で削除される。

@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { MAX_PLAYERS, MAX_SESSION_HOURS } from "../src/shared/defaults.js";
-import { ASA_MAPS } from "../src/shared/maps.js";
+import { ASA_MAPS, isSupportedAsaMap, parseEnabledMaps } from "../src/shared/maps.js";
 
 interface Arguments {
   profile?: string;
@@ -44,6 +44,21 @@ function aws(args: string[], profile?: string): string {
   }).trim();
 }
 
+function optionalParameter(name: string, profile?: string): string {
+  const profileArgs = profile ? ["--profile", profile] : [];
+  try {
+    return execFileSync("aws", [...profileArgs, "ssm", "get-parameter", "--name", name, "--query", "Parameter.Value", "--output", "text"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (error) {
+    const stderr = String((error as { stderr?: string | Buffer }).stderr ?? "");
+    if (stderr.includes("ParameterNotFound")) return "";
+    if (stderr) process.stderr.write(stderr);
+    throw error;
+  }
+}
+
 const args = parseArguments(process.argv.slice(2));
 if (!Number.isInteger(args.maxSessionHours) || args.maxSessionHours < 1) {
   throw new Error("maxSessionHours must be a positive integer.");
@@ -63,6 +78,17 @@ const applicationId =
 const guildId =
   process.env.DISCORD_GUILD_ID ??
   aws(["ssm", "get-parameter", "--name", `${configPrefix}/discord/guild-id`, "--query", "Parameter.Value"], args.profile);
+const enabledMaps = parseEnabledMaps(
+  process.env.ASA_ENABLED_MAPS ?? optionalParameter(`${configPrefix}/server/enabled-maps`, args.profile),
+);
+const unsupportedEnabledMaps = enabledMaps.filter((map) => !isSupportedAsaMap(map));
+if (unsupportedEnabledMaps.length > 0) {
+  throw new Error(`enabled-maps contains unsupported map values: ${unsupportedEnabledMaps.join(", ")}`);
+}
+const mapChoices = enabledMaps.length > 0 ? ASA_MAPS.filter((map) => enabledMaps.includes(map.value)) : ASA_MAPS;
+if (enabledMaps.length > 0 && mapChoices.length === 0) {
+  throw new Error("enabled-maps did not match any supported maps.");
+}
 
 if (!token || !applicationId || !guildId) {
   throw new Error("DISCORD_BOT_TOKEN, DISCORD_APPLICATION_ID, and DISCORD_GUILD_ID are required.");
@@ -91,7 +117,7 @@ const commands = [
             description: "Map name",
             type: 3,
             required: false,
-            choices: ASA_MAPS,
+            choices: mapChoices,
           },
           {
             name: "max_players",
