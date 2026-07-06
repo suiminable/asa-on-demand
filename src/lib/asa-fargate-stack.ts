@@ -236,6 +236,7 @@ export class AsaFargateStack extends cdk.Stack {
         ASA_UPDATE_ON_START: String(asaUpdateOnStart),
         AUTO_BACKUP_INTERVAL_SECONDS: "600",
         BACKUP_REQUEST_KEY: s3Key(resourcePrefix, "runtime/backup-request.json"),
+        HEARTBEAT_KEY: s3Key(resourcePrefix, "runtime/heartbeat.json"),
       },
       secrets: {
         DISCORD_WEBHOOK_URL: ecs.Secret.fromSecretsManager(notificationWebhookSecret),

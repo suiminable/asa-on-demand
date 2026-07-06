@@ -1,6 +1,6 @@
 import { ECSClient, RunTaskCommand, StopTaskCommand } from "@aws-sdk/client-ecs";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CreateScheduleCommand, DeleteScheduleCommand, SchedulerClient } from "@aws-sdk/client-scheduler";
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from "aws-lambda";
 import { canStart, hours, monthKey } from "../../shared/budget.js";
@@ -57,6 +57,7 @@ const enableOnDemandFallback = process.env.ENABLE_ON_DEMAND_FALLBACK === "true";
 const allowDiscordPasswordNotification = process.env.ALLOW_DISCORD_PASSWORD_NOTIFICATION === "true";
 const functionName = requireEnv("AWS_LAMBDA_FUNCTION_NAME");
 const startingStaleMs = 10 * 60 * 1000;
+const heartbeatFreshnessMs = 180 * 1000;
 
 interface AsyncCommandEvent {
   source: "asa.discord.command";
@@ -297,11 +298,34 @@ async function handleStatus() {
   const budget = await store.getBudget(monthKey());
   const runtimeSeconds = budget?.runtimeSeconds ?? 0;
   if (!state) return message("Status: STOPPED\nThis month: 0h", true);
+  let playerCount: number | undefined;
+  if (state.status === "RUNNING") {
+    try {
+      const object = await s3.send(new GetObjectCommand({ Bucket: bucketName, Key: `${s3RuntimePrefix}heartbeat.json` }));
+      const heartbeat = JSON.parse((await object.Body?.transformToString()) ?? "") as {
+        playerCount?: unknown;
+        updatedAt?: unknown;
+      };
+      const updatedAt = typeof heartbeat.updatedAt === "string" ? Date.parse(heartbeat.updatedAt) : Number.NaN;
+      const ageMs = Date.now() - updatedAt;
+      if (
+        Number.isInteger(heartbeat.playerCount) &&
+        (heartbeat.playerCount as number) >= 0 &&
+        Number.isFinite(updatedAt) &&
+        ageMs >= 0 &&
+        ageMs <= heartbeatFreshnessMs
+      ) {
+        playerCount = heartbeat.playerCount as number;
+      }
+    } catch {
+      // Missing, stale, or malformed heartbeats fall back to unknown.
+    }
+  }
   return message(
     [
       `Status: ${state.status}`,
       `Map: ${state.mapName}`,
-      `Players: unknown / ${state.maxPlayers}`,
+      `Players: ${playerCount ?? "unknown"} / ${state.maxPlayers}`,
       `Started: ${state.startedAt ?? "N/A"}`,
       `Expires: ${state.expiresAt ?? "N/A"}`,
       `Connect: ${state.connectCommand ?? "not available"}`,

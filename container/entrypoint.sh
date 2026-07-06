@@ -39,6 +39,7 @@ mkdir -p /asa/server /asa/work /asa/tmp /asa/scripts
 asa_pid=""
 backup_loop_pid=""
 request_loop_pid=""
+heartbeat_loop_pid=""
 stopping="false"
 
 notify() {
@@ -54,6 +55,7 @@ run_backup() {
 stop_background_loops() {
   if [[ -n "${backup_loop_pid}" ]]; then kill "${backup_loop_pid}" 2>/dev/null || true; fi
   if [[ -n "${request_loop_pid}" ]]; then kill "${request_loop_pid}" 2>/dev/null || true; fi
+  if [[ -n "${heartbeat_loop_pid}" ]]; then kill "${heartbeat_loop_pid}" 2>/dev/null || true; fi
 }
 
 shutdown() {
@@ -153,6 +155,19 @@ backup_loop_pid="$!"
   done
 ) &
 request_loop_pid="$!"
+
+(
+  key="${HEARTBEAT_KEY:-runtime/heartbeat.json}"
+  while true; do
+    sleep 60
+    players="$(/asa/scripts/rcon.py ListPlayers 2>/dev/null)" || continue
+    count="$(grep -c '^[0-9]\+\.' <<<"${players}" || true)"
+    printf '{"playerCount": %d, "updatedAt": "%s"}\n' \
+      "${count}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      | aws s3 cp - "s3://${S3_BUCKET}/${key}" --content-type application/json || true
+  done
+) &
+heartbeat_loop_pid="$!"
 
 (
   for _ in $(seq 1 120); do

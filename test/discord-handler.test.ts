@@ -5,6 +5,9 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
   lambdaSend: vi.fn(),
+  s3Send: vi.fn(),
+  getServer: vi.fn(),
+  getBudget: vi.fn(),
   parameters: new Map<string, string>(),
 }));
 
@@ -27,6 +30,25 @@ vi.mock("@aws-sdk/client-ssm", () => ({
       if (value === undefined) throw Object.assign(new Error("Parameter not found"), { name: "ParameterNotFound" });
       return Promise.resolve({ Parameter: { Value: value } });
     }
+  },
+}));
+
+vi.mock("@aws-sdk/client-s3", () => ({
+  GetObjectCommand: class {
+    constructor(readonly input: Record<string, unknown>) {}
+  },
+  PutObjectCommand: class {
+    constructor(readonly input: Record<string, unknown>) {}
+  },
+  S3Client: class {
+    send = mocks.s3Send;
+  },
+}));
+
+vi.mock("../src/shared/state.js", () => ({
+  StateStore: class {
+    getServer = mocks.getServer;
+    getBudget = mocks.getBudget;
   },
 }));
 
@@ -58,6 +80,44 @@ async function runAsyncStart(map?: string): Promise<string> {
   await handler({ source: "asa.discord.command", interaction: startInteraction(map) });
   const request = mocks.fetch.mock.calls.at(-1)?.[1] as { body?: string } | undefined;
   return JSON.parse(request?.body ?? "{}").content ?? "";
+}
+
+async function runAsyncStatus(): Promise<string> {
+  await handler({
+    source: "asa.discord.command",
+    interaction: {
+      id: "interaction-status",
+      application_id: "application-1",
+      token: "token-status",
+      type: 2,
+      guild_id: "guild-1",
+      member: { user: { id: "user-1" }, roles: [] },
+      data: { options: [{ type: 1, name: "status" }] },
+    },
+  });
+  const request = mocks.fetch.mock.calls.at(-1)?.[1] as { body?: string } | undefined;
+  return JSON.parse(request?.body ?? "{}").content ?? "";
+}
+
+function runningServer() {
+  return {
+    pk: "SERVER",
+    status: "RUNNING",
+    taskArn: "task-1",
+    clusterArn: "cluster",
+    startedAt: "2026-07-06T00:00:00.000Z",
+    expiresAt: "2026-07-06T03:00:00.000Z",
+    publicIp: "192.0.2.1",
+    connectCommand: "open 192.0.2.1:7777",
+    sessionName: "private-asa",
+    mapName: "TheIsland_WP",
+    maxPlayers: 4,
+    startedByDiscordUserId: "user-1",
+    startedFromChannelId: null,
+    lastBackupAt: null,
+    lastStopReason: null,
+    updatedAt: "2026-07-06T00:00:00.000Z",
+  };
 }
 
 function signedEvent(interaction: object): APIGatewayProxyEventV2 {
@@ -95,6 +155,9 @@ beforeEach(async () => {
   mocks.parameters.set("/asa/discord/allowed-role-ids", "[]");
   mocks.parameters.set("/asa/server/session-name", "invalid session name");
   mocks.lambdaSend.mockReset().mockResolvedValue({ StatusCode: 202 });
+  mocks.s3Send.mockReset();
+  mocks.getServer.mockReset();
+  mocks.getBudget.mockReset().mockResolvedValue(undefined);
   mocks.fetch.mockReset().mockResolvedValue({ ok: true });
   ({ handler } = await import("../src/lambdas/discord-interactions/index.js"));
 });
@@ -177,5 +240,32 @@ describe("Discord interaction handler", () => {
     mocks.parameters.set("/asa/server/enabled-maps", "TheIsland_WP,Unknown_WP");
 
     expect(await runAsyncStart("TheIsland_WP")).toContain("enabled-maps parameter contains unsupported map values: Unknown_WP");
+  });
+
+  it("shows the player count from a fresh heartbeat", async () => {
+    mocks.getServer.mockResolvedValue(runningServer());
+    mocks.s3Send.mockResolvedValue({
+      Body: { transformToString: async () => JSON.stringify({ playerCount: 2, updatedAt: new Date().toISOString() }) },
+    });
+
+    expect(await runAsyncStatus()).toContain("Players: 2 / 4");
+  });
+
+  it("shows unknown when the heartbeat is stale", async () => {
+    mocks.getServer.mockResolvedValue(runningServer());
+    mocks.s3Send.mockResolvedValue({
+      Body: {
+        transformToString: async () => JSON.stringify({ playerCount: 2, updatedAt: new Date(Date.now() - 181_000).toISOString() }),
+      },
+    });
+
+    expect(await runAsyncStatus()).toContain("Players: unknown / 4");
+  });
+
+  it("shows unknown when the heartbeat does not exist", async () => {
+    mocks.getServer.mockResolvedValue(runningServer());
+    mocks.s3Send.mockRejectedValue(Object.assign(new Error("Heartbeat not found"), { name: "NoSuchKey" }));
+
+    expect(await runAsyncStatus()).toContain("Players: unknown / 4");
   });
 });
