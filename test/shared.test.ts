@@ -91,7 +91,9 @@ describe("Config helpers", () => {
 describe("ASA maps", () => {
   it("keeps Discord choices and server validation on the same allowlist", () => {
     expect(ASA_MAPS).toContainEqual({ name: "The Island", value: "TheIsland_WP" });
+    expect(ASA_MAPS).toContainEqual({ name: "Genesis: Part 1", value: "Genesis_WP" });
     expect(isSupportedAsaMap("Ragnarok_WP")).toBe(true);
+    expect(isSupportedAsaMap("Genesis_WP")).toBe(true);
     expect(isSupportedAsaMap("Genesis2_WP")).toBe(false);
   });
 

@@ -8,6 +8,7 @@ export const ASA_MAPS = [
   { name: "Ragnarok", value: "Ragnarok_WP" },
   { name: "Valguero", value: "Valguero_WP" },
   { name: "Lost Colony", value: "LostColony_WP" },
+  { name: "Genesis: Part 1", value: "Genesis_WP" },
 ] as const;
 
 const asaMapValues = new Set<string>(ASA_MAPS.map((map) => map.value));
