@@ -28,8 +28,8 @@ def receive_packet(connection: socket.socket) -> tuple[int, int, str]:
 
 
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in {"SaveWorld", "DoExit"}:
-        print("Usage: rcon.py SaveWorld|DoExit", file=sys.stderr)
+    if len(sys.argv) != 2 or sys.argv[1] not in {"SaveWorld", "DoExit", "ListPlayers"}:
+        print("Usage: rcon.py SaveWorld|DoExit|ListPlayers", file=sys.stderr)
         return 2
 
     host = os.environ.get("ASA_RCON_HOST", "127.0.0.1")
