@@ -160,7 +160,6 @@ pnpm run discord:register \
 ```
 
 The script reads the bot token from Secrets Manager, the application and guild IDs from SSM, and the optional map restriction from `server/enabled-maps`. The existing `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, `DISCORD_GUILD_ID`, and `ASA_ENABLED_MAPS` environment variables remain available as overrides.
-When deploying with a non-default `-c maxSessionHours=<hours>`, pass the same value as `--maxSessionHours <hours>` while registering commands.
 
 ## Useful Commands
 
@@ -179,7 +178,7 @@ pnpm run image:push --profile my-aws-profile
 - Fargate Spot is the default capacity provider strategy. On-demand fallback is disabled unless `-c enableOnDemandFallback=true` is provided.
 - The default task size is 4 vCPU and 24 GiB memory.
 - Discord budget output shows both a conservative estimate (`hourlyCostJpy`, default 52 JPY/hour) and a variable Fargate Spot estimate (`spotHourlyCostJpy`, default 17 JPY/hour).
-- `/asa start` defaults to 8 hours and accepts `duration_hours` from 1 to 48. The runtime guard rejects a 48-hour request when less than 48 hours remain under `monthlyRuntimeHoursLimit` (default 80 hours); use a shorter duration in that case. At the default Spot estimate, 8 hours is about JPY 136 and 48 hours is about JPY 816; `monthlyBudgetJpy` remains 1,500 by default.
+- `/asa start` has no fixed session TTL. It accepts `idle_minutes` from 1 to 1440 (default 30) and stops after distinct fresh heartbeats report zero players for that interval. Missing or stale heartbeats do not trigger a stop. The running task is also stopped when `monthlyRuntimeHoursLimit` (default 80 hours) is reached.
 - ASA and UMU-Proton are installed when `scripts/push-image.sh` builds the Docker image. CDK synth and deploy do not invoke Docker.
 - To pick up an ASA update, first run `./scripts/push-image.sh --build-id 2026-07-05`, then deploy with the same tag using `pnpm exec cdk deploy -c asaBuildId=2026-07-05`. A missing or mismatched tag makes the ECS task stop with an image pull error.
 - `-c asaUpdateOnStart=true` enables a SteamCMD update on every task start for emergency use. It is disabled by default.

@@ -160,7 +160,6 @@ pnpm run discord:register \
 ```
 
 このスクリプトは bot トークンを Secrets Manager から、アプリケーション ID・ギルド ID と任意のマップ制限を SSM の `server/enabled-maps` から読み込む。従来どおり `DISCORD_BOT_TOKEN`、`DISCORD_APPLICATION_ID`、`DISCORD_GUILD_ID`、`ASA_ENABLED_MAPS` の環境変数で上書きもできる。
-デフォルト以外の `-c maxSessionHours=<hours>` でデプロイする場合は、コマンド登録時にも同じ値を `--maxSessionHours <hours>` で渡す。
 
 ## よく使うコマンド
 
@@ -179,7 +178,7 @@ pnpm run image:push --profile my-aws-profile
 - キャパシティプロバイダ戦略のデフォルトは Fargate Spot。`-c enableOnDemandFallback=true` を指定しない限りオンデマンドへのフォールバックは無効。
 - タスクサイズのデフォルトは 4 vCPU・24 GiB メモリ。
 - Discord の budget 出力は、保守的な見積もり(`hourlyCostJpy`、デフォルト 52 円/時)と Fargate Spot の変動見積もり(`spotHourlyCostJpy`、デフォルト 17 円/時)の両方を表示する。
-- `/asa start` のデフォルトは 8 時間で、`duration_hours` には 1〜48 を指定できる。`monthlyRuntimeHoursLimit`(デフォルト 80 時間)の残りが 48 時間未満ならランタイム制限により 48 時間の起動は拒否されるため、その場合は短い時間を指定する。Spot のデフォルト見積もりでは 8 時間は約 136 円、48 時間は約 816 円。`monthlyBudgetJpy` のデフォルトは 1,500 円のままとする。
+- `/asa start` に固定のセッション TTL はない。`idle_minutes` へ 1〜1440 分を指定でき、既定値は 30 分。時刻の異なる fresh な heartbeat がその時間連続して 0 人を示すと停止する。heartbeat の欠落や鮮度切れだけでは停止しない。稼働中に `monthlyRuntimeHoursLimit`(既定 80 時間)へ到達した場合も停止する。
 - ASA と UMU-Proton は `scripts/push-image.sh` の Docker イメージビルド時にインストールされる。CDK の synth / deploy は Docker を起動しない。
 - ASA のアップデートを取り込むには、まず `./scripts/push-image.sh --build-id 2026-07-05` を実行し、次に同じタグで `pnpm exec cdk deploy -c asaBuildId=2026-07-05` をデプロイする。タグが存在しない・一致しない場合、ECS タスクはイメージの pull エラーで停止する。
 - `-c asaUpdateOnStart=true` で、タスク起動のたびに SteamCMD で更新する緊急用モードを有効にできる。デフォルトは無効。
