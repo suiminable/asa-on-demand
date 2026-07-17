@@ -4,11 +4,28 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
+  ecsSend: vi.fn(),
   lambdaSend: vi.fn(),
   s3Send: vi.fn(),
+  schedulerSend: vi.fn(),
   getServer: vi.fn(),
   getBudget: vi.fn(),
+  putServerStarting: vi.fn(),
+  updateServerStatus: vi.fn(),
+  incrementStartCount: vi.fn(),
   parameters: new Map<string, string>(),
+}));
+
+vi.mock("@aws-sdk/client-ecs", () => ({
+  RunTaskCommand: class {
+    constructor(readonly input: Record<string, unknown>) {}
+  },
+  StopTaskCommand: class {
+    constructor(readonly input: Record<string, unknown>) {}
+  },
+  ECSClient: class {
+    send = mocks.ecsSend;
+  },
 }));
 
 vi.mock("@aws-sdk/client-lambda", () => ({
@@ -45,10 +62,25 @@ vi.mock("@aws-sdk/client-s3", () => ({
   },
 }));
 
+vi.mock("@aws-sdk/client-scheduler", () => ({
+  CreateScheduleCommand: class {
+    constructor(readonly input: Record<string, unknown>) {}
+  },
+  DeleteScheduleCommand: class {
+    constructor(readonly input: Record<string, unknown>) {}
+  },
+  SchedulerClient: class {
+    send = mocks.schedulerSend;
+  },
+}));
+
 vi.mock("../src/shared/state.js", () => ({
   StateStore: class {
     getServer = mocks.getServer;
     getBudget = mocks.getBudget;
+    putServerStarting = mocks.putServerStarting;
+    updateServerStatus = mocks.updateServerStatus;
+    incrementStartCount = mocks.incrementStartCount;
   },
 }));
 
@@ -56,7 +88,11 @@ const keyPair = nacl.sign.keyPair();
 const publicKey = Buffer.from(keyPair.publicKey).toString("hex");
 let handler: typeof import("../src/lambdas/discord-interactions/index.js").handler;
 
-function startInteraction(map?: string) {
+function startInteraction(map?: string, idleMinutes?: number, publicNotify?: boolean) {
+  const options: Array<{ name: string; value: string | number | boolean }> = [];
+  if (map) options.push({ name: "map", value: map });
+  if (idleMinutes !== undefined) options.push({ name: "idle_minutes", value: idleMinutes });
+  if (publicNotify !== undefined) options.push({ name: "public_notify", value: publicNotify });
   return {
     id: "interaction-start",
     application_id: "application-1",
@@ -69,15 +105,15 @@ function startInteraction(map?: string) {
         {
           type: 1,
           name: "start",
-          options: map ? [{ name: "map", value: map }] : [],
+          options,
         },
       ],
     },
   };
 }
 
-async function runAsyncStart(map?: string): Promise<string> {
-  await handler({ source: "asa.discord.command", interaction: startInteraction(map) });
+async function runAsyncStart(map?: string, idleMinutes?: number, publicNotify?: boolean): Promise<string> {
+  await handler({ source: "asa.discord.command", interaction: startInteraction(map, idleMinutes, publicNotify) });
   const request = mocks.fetch.mock.calls.at(-1)?.[1] as { body?: string } | undefined;
   return JSON.parse(request?.body ?? "{}").content ?? "";
 }
@@ -106,12 +142,15 @@ function runningServer() {
     taskArn: "task-1",
     clusterArn: "cluster",
     startedAt: "2026-07-06T00:00:00.000Z",
-    expiresAt: "2026-07-06T03:00:00.000Z",
+    taskStartedAt: "2026-07-06T00:00:00.000Z",
     publicIp: "192.0.2.1",
     connectCommand: "open 192.0.2.1:7777",
     sessionName: "private-asa",
     mapName: "TheIsland_WP",
     maxPlayers: 4,
+    idleTimeoutMinutes: 30,
+    idleSince: null,
+    lastHeartbeatAt: null,
     startedByDiscordUserId: "user-1",
     startedFromChannelId: null,
     lastBackupAt: null,
@@ -140,6 +179,7 @@ beforeAll(() => {
     SECURITY_GROUP_ID: "sg-1",
     STOP_SCHEDULE_NAME: "stop-schedule",
     STOP_SCHEDULER_ROLE_ARN: "scheduler-role",
+    STOP_SERVER_FUNCTION_ARN: "stop-function",
     S3_BUCKET: "bucket",
     AWS_LAMBDA_FUNCTION_NAME: "discord-handler",
   });
@@ -155,9 +195,14 @@ beforeEach(async () => {
   mocks.parameters.set("/asa/discord/allowed-role-ids", "[]");
   mocks.parameters.set("/asa/server/session-name", "invalid session name");
   mocks.lambdaSend.mockReset().mockResolvedValue({ StatusCode: 202 });
+  mocks.ecsSend.mockReset().mockResolvedValue({ tasks: [{ taskArn: "task-1" }] });
   mocks.s3Send.mockReset();
+  mocks.schedulerSend.mockReset().mockResolvedValue({});
   mocks.getServer.mockReset();
   mocks.getBudget.mockReset().mockResolvedValue(undefined);
+  mocks.putServerStarting.mockReset().mockResolvedValue(undefined);
+  mocks.updateServerStatus.mockReset().mockResolvedValue(undefined);
+  mocks.incrementStartCount.mockReset().mockResolvedValue(undefined);
   mocks.fetch.mockReset().mockResolvedValue({ ok: true });
   ({ handler } = await import("../src/lambdas/discord-interactions/index.js"));
 });
@@ -242,13 +287,57 @@ describe("Discord interaction handler", () => {
     expect(await runAsyncStart("TheIsland_WP")).toContain("enabled-maps parameter contains unsupported map values: Unknown_WP");
   });
 
+  it("starts with the default 30-minute idle timeout and a recurring check", async () => {
+    mocks.parameters.set("/asa/server/session-name", "private-asa");
+    mocks.parameters.set("/asa/server/max-players", "4");
+    mocks.getServer.mockResolvedValue(undefined);
+
+    const content = await runAsyncStart("TheIsland_WP", undefined, false);
+
+    expect(content).toContain("no players for 30m");
+    expect(mocks.putServerStarting).toHaveBeenCalledWith(
+      expect.objectContaining({ idleTimeoutMinutes: 30, idleSince: null, lastHeartbeatAt: null }),
+      expect.any(String),
+    );
+    expect(mocks.putServerStarting.mock.calls[0][0]).not.toHaveProperty("expiresAt");
+    const runTask = mocks.ecsSend.mock.calls[0][0] as { input: { overrides: { containerOverrides: Array<{ environment: unknown[] }> } } };
+    expect(runTask.input.overrides.containerOverrides[0].environment).toEqual(
+      expect.arrayContaining([
+        { name: "IDLE_TIMEOUT_MINUTES", value: "30" },
+        { name: "MONTHLY_RUNTIME_HOURS_LIMIT", value: "80" },
+      ]),
+    );
+    const createSchedule = mocks.schedulerSend.mock.calls
+      .map(([command]) => command)
+      .find((command) => "ScheduleExpression" in command.input);
+    expect(createSchedule.input).toMatchObject({
+      ScheduleExpression: "rate(1 minute)",
+      Target: { Input: JSON.stringify({ source: "IDLE_CHECK" }) },
+    });
+  });
+
+  it("stores an explicit idle_minutes value for the session", async () => {
+    mocks.parameters.set("/asa/server/session-name", "private-asa");
+    mocks.parameters.set("/asa/server/max-players", "4");
+    mocks.getServer.mockResolvedValue(undefined);
+
+    expect(await runAsyncStart("TheIsland_WP", 45, false)).toContain("no players for 45m");
+    expect(mocks.putServerStarting).toHaveBeenCalledWith(expect.objectContaining({ idleTimeoutMinutes: 45 }), expect.any(String));
+  });
+
+  it("rejects idle_minutes outside the documented range", async () => {
+    expect(await runAsyncStart("TheIsland_WP", 1441, false)).toContain("idle_minutes must be an integer from 1 to 1440");
+    expect(mocks.ecsSend).not.toHaveBeenCalled();
+  });
+
   it("shows the player count from a fresh heartbeat", async () => {
     mocks.getServer.mockResolvedValue(runningServer());
     mocks.s3Send.mockResolvedValue({
-      Body: { transformToString: async () => JSON.stringify({ playerCount: 2, updatedAt: new Date().toISOString() }) },
+      Body: { transformToString: async () => JSON.stringify({ playerCount: 2, updatedAt: new Date(Date.now() - 1000).toISOString() }) },
     });
 
     expect(await runAsyncStatus()).toContain("Players: 2 / 4");
+    expect(await runAsyncStatus()).toContain("Auto-stop: no players for 30m / monthly limit 80h");
   });
 
   it("shows unknown when the heartbeat is stale", async () => {

@@ -6,12 +6,15 @@ export interface ServerState {
   taskArn?: string | null;
   clusterArn?: string | null;
   startedAt?: string | null;
-  expiresAt?: string | null;
+  taskStartedAt?: string | null;
   publicIp?: string | null;
   connectCommand?: string | null;
   sessionName: string;
   mapName: string;
   maxPlayers: number;
+  idleTimeoutMinutes: number;
+  idleSince?: string | null;
+  lastHeartbeatAt?: string | null;
   startedByDiscordUserId?: string | null;
   startedFromChannelId?: string | null;
   lastBackupAt?: string | null;

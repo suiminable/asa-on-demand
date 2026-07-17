@@ -4,6 +4,17 @@ import type { BudgetState, ServerState, ServerStatus } from "./types.js";
 
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
+function errorName(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "name" in error ? String(error.name) : undefined;
+}
+
+export interface BudgetSettlement {
+  budgetPk: string;
+  runtimeSeconds: number;
+  estimatedCostJpy: number;
+  estimatedCostUsd: number;
+}
+
 export class StateStore {
   constructor(private readonly tableName: string) {}
 
@@ -36,15 +47,9 @@ export class StateStore {
     );
   }
 
-  async settleStoppedTask(params: {
-    taskArn: string;
-    budgetPk: string;
-    runtimeSeconds: number;
-    estimatedCostJpy: number;
-    estimatedCostUsd: number;
-    reason: string;
-  }): Promise<boolean> {
+  async settleStoppedTask(params: { taskArn: string; budgets: BudgetSettlement[]; reason: string }): Promise<boolean> {
     const now = new Date().toISOString();
+    if (params.budgets.length > 98) throw new Error("A task settlement cannot span more than 98 budget months.");
     try {
       await documentClient.send(
         new TransactWriteCommand({
@@ -56,27 +61,27 @@ export class StateStore {
                 ConditionExpression: "attribute_not_exists(pk)",
               },
             },
-            {
+            ...params.budgets.map((budget) => ({
               Update: {
                 TableName: this.tableName,
-                Key: { pk: params.budgetPk },
+                Key: { pk: budget.budgetPk },
                 UpdateExpression:
                   "ADD runtimeSeconds :runtimeSeconds, estimatedCostJpy :estimatedCostJpy, estimatedCostUsd :estimatedCostUsd SET updatedAt = :updatedAt, startCount = if_not_exists(startCount, :zero)",
                 ExpressionAttributeValues: {
-                  ":runtimeSeconds": params.runtimeSeconds,
-                  ":estimatedCostJpy": params.estimatedCostJpy,
-                  ":estimatedCostUsd": params.estimatedCostUsd,
+                  ":runtimeSeconds": budget.runtimeSeconds,
+                  ":estimatedCostJpy": budget.estimatedCostJpy,
+                  ":estimatedCostUsd": budget.estimatedCostUsd,
                   ":updatedAt": now,
                   ":zero": 0,
                 },
               },
-            },
+            })),
             {
               Update: {
                 TableName: this.tableName,
                 Key: { pk: "SERVER" },
                 UpdateExpression:
-                  "SET #status = :stopped, #updatedAt = :updatedAt, taskArn = :null, publicIp = :null, connectCommand = :null, lastStopReason = :reason",
+                  "SET #status = :stopped, #updatedAt = :updatedAt, taskArn = :null, taskStartedAt = :null, publicIp = :null, connectCommand = :null, idleSince = :null, lastHeartbeatAt = :null, lastStopReason = :reason",
                 ConditionExpression: "taskArn = :taskArn",
                 ExpressionAttributeNames: { "#status": "status", "#updatedAt": "updatedAt" },
                 ExpressionAttributeValues: {
@@ -93,7 +98,7 @@ export class StateStore {
       );
       return true;
     } catch (error) {
-      if (error instanceof Error && error.name === "TransactionCanceledException") return false;
+      if (errorName(error) === "TransactionCanceledException") return false;
       throw error;
     }
   }
@@ -119,6 +124,31 @@ export class StateStore {
         ExpressionAttributeValues: attrValues,
       }),
     );
+  }
+
+  async updateRunningIdleState(taskArn: string, values: { idleSince: string | null; lastHeartbeatAt: string | null }): Promise<boolean> {
+    try {
+      await documentClient.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: { pk: "SERVER" },
+          UpdateExpression: "SET idleSince = :idleSince, lastHeartbeatAt = :lastHeartbeatAt, #updatedAt = :updatedAt",
+          ConditionExpression: "#status = :running AND taskArn = :taskArn",
+          ExpressionAttributeNames: { "#status": "status", "#updatedAt": "updatedAt" },
+          ExpressionAttributeValues: {
+            ":idleSince": values.idleSince,
+            ":lastHeartbeatAt": values.lastHeartbeatAt,
+            ":updatedAt": new Date().toISOString(),
+            ":running": "RUNNING",
+            ":taskArn": taskArn,
+          },
+        }),
+      );
+      return true;
+    } catch (error) {
+      if (errorName(error) === "ConditionalCheckFailedException") return false;
+      throw error;
+    }
   }
 
   async incrementStartCount(pk: string): Promise<void> {

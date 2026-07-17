@@ -20,7 +20,7 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import type { Construct } from "constructs";
 import { normalizeConfigPrefix, parameterNamesFor, secretNamesFor } from "../shared/config.js";
-import { DEFAULT_SESSION_HOURS, MAX_SESSION_HOURS } from "../shared/defaults.js";
+import { DEFAULT_IDLE_MINUTES, HEARTBEAT_FRESHNESS_SECONDS, MAX_IDLE_MINUTES, MIN_IDLE_MINUTES } from "../shared/defaults.js";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(dirname, "../..");
@@ -99,8 +99,10 @@ export class AsaFargateStack extends cdk.Stack {
     const memoryMiB = numberContext(this, { name: "asaMemoryMiB", defaultValue: 24576 });
     const ephemeralStorageGiB = numberContext(this, { name: "asaEphemeralStorageGiB", defaultValue: 100 });
     const stopTimeoutSeconds = numberContext(this, { name: "asaStopTimeoutSeconds", defaultValue: 120 });
-    const defaultSessionHours = numberContext(this, { name: "defaultSessionHours", defaultValue: DEFAULT_SESSION_HOURS });
-    const maxSessionHours = numberContext(this, { name: "maxSessionHours", defaultValue: MAX_SESSION_HOURS });
+    const defaultIdleMinutes = numberContext(this, { name: "defaultIdleMinutes", defaultValue: DEFAULT_IDLE_MINUTES });
+    if (!Number.isInteger(defaultIdleMinutes) || defaultIdleMinutes < MIN_IDLE_MINUTES || defaultIdleMinutes > MAX_IDLE_MINUTES) {
+      throw new Error(`Context defaultIdleMinutes must be an integer from ${MIN_IDLE_MINUTES} to ${MAX_IDLE_MINUTES}.`);
+    }
     const monthlyBudgetJpy = numberContext(this, { name: "monthlyBudgetJpy", defaultValue: 1500 });
     const hourlyCostJpy = numberContext(this, { name: "hourlyCostJpy", defaultValue: 52 });
     const spotHourlyCostJpy = numberContext(this, { name: "spotHourlyCostJpy", defaultValue: 17 });
@@ -321,8 +323,8 @@ export class AsaFargateStack extends cdk.Stack {
       CONFIG_PREFIX: configPrefix,
       STOP_SCHEDULE_NAME: resourcePrefix ? `asa-${resourceNameSegment}-auto-stop` : "asa-auto-stop",
       STOP_SCHEDULER_ROLE_ARN: stopSchedulerRole.roleArn,
-      DEFAULT_SESSION_HOURS: String(defaultSessionHours),
-      MAX_SESSION_HOURS: String(maxSessionHours),
+      DEFAULT_IDLE_MINUTES: String(defaultIdleMinutes),
+      HEARTBEAT_FRESHNESS_SECONDS: String(HEARTBEAT_FRESHNESS_SECONDS),
       MONTHLY_RUNTIME_HOURS_LIMIT: String(monthlyRuntimeHoursLimit),
       MONTHLY_BUDGET_JPY: String(monthlyBudgetJpy),
       HOURLY_COST_JPY: String(hourlyCostJpy),
@@ -415,6 +417,7 @@ export class AsaFargateStack extends cdk.Stack {
     stateTable.grantReadWriteData(stopServer);
     stateBucket.grantPut(discordInteractions, s3Pattern(resourcePrefix, "runtime/*"));
     stateBucket.grantRead(discordInteractions, s3Pattern(resourcePrefix, "runtime/*"));
+    stateBucket.grantRead(stopServer, s3Pattern(resourcePrefix, "runtime/*"));
 
     for (const fn of [discordInteractions, stopServer]) {
       fn.addToRolePolicy(
