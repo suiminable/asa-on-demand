@@ -11,6 +11,7 @@ export interface ServerState {
   connectCommand?: string | null;
   sessionName: string;
   mapName: string;
+  eventModId?: string | null;
   maxPlayers: number;
   idleTimeoutMinutes: number;
   idleSince?: string | null;

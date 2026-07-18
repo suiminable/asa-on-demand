@@ -144,6 +144,20 @@ Required SSM parameters:
 Optional SSM parameters:
 
 - `/asa/<resourcePrefix>/server/enabled-maps` — comma-separated map values such as `TheIsland_WP,ScorchedEarth_WP`. When absent, every map in the shared allowlist is enabled. SSM String parameters cannot be empty, so delete this parameter to remove the restriction. Re-run `pnpm run discord:register` after changing or deleting it.
+- `/asa/<resourcePrefix>/server/event-mod-id` — the CurseForge project ID for the ASA event mod to launch. Every `/asa start` reads the latest value and applies it as `-mods=<ID>`. An absent/deleted parameter or `None` means no event mod. A change does not affect an already running task, so stop and restart the server.
+
+For example, set the officially announced Summer Bash 2026 Mod ID `927091` in a prefixed environment:
+
+```bash
+aws ssm put-parameter \
+  --profile my-aws-profile \
+  --name /asa/maps/the-island/server/event-mod-id \
+  --type String \
+  --value 927091 \
+  --overwrite
+```
+
+Activation methods and Mod IDs can change between events. Check the latest Studio Wildcard announcement before setting the parameter.
 
 For the default unprefixed environment, omit `resourcePrefix`; these become `/asa/discord/bot-token`, `/asa/server/default-map`, and so on. For `resourcePrefix=maps/the-island`, they become `/asa/maps/the-island/discord/bot-token`, `/asa/maps/the-island/server/default-map`, and so on.
 
@@ -183,6 +197,7 @@ pnpm run image:push --profile my-aws-profile
 - To pick up an ASA update, first run `./scripts/push-image.sh --build-id 2026-07-05`, then deploy with the same tag using `pnpm exec cdk deploy -c asaBuildId=2026-07-05`. A missing or mismatched tag makes the ECS task stop with an image pull error.
 - `-c asaUpdateOnStart=true` enables a SteamCMD update on every task start for emergency use. It is disabled by default.
 - Map choices are validated by the Lambda and registered from a shared allowlist. The optional `server/enabled-maps` parameter restricts each environment to a subset; re-run `pnpm run discord:register` after changing the shared list or this parameter.
+- Select an ASA event mod with the optional `server/event-mod-id` parameter. The Lambda reads it for every start and passes only a numeric project ID to the ECS task; the container appends `-mods=<ID>`. Start/status/info and READY notifications show the selected ID.
 - Cross-map transfers within one stack are asynchronous: cluster data is included in that stack's S3 save archive, but multiple maps are not run simultaneously. Cross-stack transfer is not supported.
 - Discord commands immediately defer the interaction, run AWS operations asynchronously, and return the command result through a follow-up response. Readiness and lifecycle updates go to the configured Discord webhook.
 - The state bucket is versioned; noncurrent object versions expire after 7 days through a bucket lifecycle rule.

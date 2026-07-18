@@ -56,4 +56,7 @@ aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/server/session-name" --type S
 aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/server/default-map" --type String --value 'TheIsland_WP'
 # Optional: restrict selectable maps (comma-separated). Delete the parameter to allow all maps.
 # aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/server/enabled-maps" --type String --value 'TheIsland_WP,ScorchedEarth_WP'
+# Optional: activate an ASA event mod by CurseForge project ID. Use None or delete the parameter to disable it.
+# Summer Bash 2026: 927091
+# aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/server/event-mod-id" --type String --value '927091'
 aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/server/max-players" --type String --value '4'

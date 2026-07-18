@@ -15,6 +15,7 @@ const parameterSuffixes = {
   sessionName: "/server/session-name",
   defaultMap: "/server/default-map",
   enabledMaps: "/server/enabled-maps",
+  eventModId: "/server/event-mod-id",
   maxPlayers: "/server/max-players",
 } as const;
 
@@ -49,14 +50,16 @@ export function secretNamesFor(prefix?: string): SecretNames {
 export const parameterNames = parameterNamesFor();
 export const secretNames = secretNamesFor();
 
-export async function getParameter(name: string, fallback?: string): Promise<string> {
+export async function getParameter(name: string, fallback?: string, options: { cache?: boolean } = {}): Promise<string> {
   const cacheKey = `parameter:${name}`;
-  const cached = cache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  if (options.cache !== false) {
+    const cached = cache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+  }
   try {
     const result = await ssm.send(new GetParameterCommand({ Name: name }));
     const value = result.Parameter?.Value ?? fallback ?? "";
-    cache.set(cacheKey, { value, expiresAt: Date.now() + cacheTtlMs });
+    if (options.cache !== false) cache.set(cacheKey, { value, expiresAt: Date.now() + cacheTtlMs });
     return value;
   } catch (error) {
     if (fallback !== undefined && error instanceof Error && error.name === "ParameterNotFound") return fallback;

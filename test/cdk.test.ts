@@ -234,4 +234,11 @@ describe("AsaFargateStack", () => {
       },
     });
   });
+
+  it("grants access to the scoped event mod parameter", () => {
+    const template = synthTemplate({ resourcePrefix: "maps/the-island" });
+    const policies = template.findResources("AWS::IAM::Policy");
+
+    expect(JSON.stringify(policies)).toContain(":parameter/asa/maps/the-island/server/event-mod-id");
+  });
 });
