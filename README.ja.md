@@ -144,6 +144,20 @@ RESOURCE_PREFIX=maps/the-island ./local/put-secrets.sh --profile my-aws-profile
 任意の SSM パラメータ:
 
 - `/asa/<resourcePrefix>/server/enabled-maps` — `TheIsland_WP,ScorchedEarth_WP` のようなカンマ区切りのマップ値。未設定なら共有許可リストの全マップを有効にする。SSM の String パラメータには空文字を設定できないため、制限を解除する場合はこのパラメータを削除する。変更または削除した後は `pnpm run discord:register` を再実行する。
+- `/asa/<resourcePrefix>/server/event-mod-id` — 起動する ASA イベント mod の CurseForge project ID。`/asa start` のたびに最新値を読み、`-mods=<ID>` として適用する。未設定、削除、または `None` ならイベント mod を指定しない。変更は稼働中のタスクには反映されないため、サーバーを停止してから再起動する。
+
+たとえば Summer Bash 2026 の公式案内にある Mod ID `927091` をプレフィックス付き環境へ設定する:
+
+```bash
+aws ssm put-parameter \
+  --profile my-aws-profile \
+  --name /asa/maps/the-island/server/event-mod-id \
+  --type String \
+  --value 927091 \
+  --overwrite
+```
+
+イベントごとに有効化方法や Mod ID が変わる可能性があるため、設定時は Studio Wildcard の最新案内を確認する。
 
 プレフィックスなしのデフォルト環境では `resourcePrefix` を省略し、`/asa/discord/bot-token`、`/asa/server/default-map` のようになる。`resourcePrefix=maps/the-island` の場合は `/asa/maps/the-island/discord/bot-token`、`/asa/maps/the-island/server/default-map` のようになる。
 
@@ -183,6 +197,7 @@ pnpm run image:push --profile my-aws-profile
 - ASA のアップデートを取り込むには、まず `./scripts/push-image.sh --build-id 2026-07-05` を実行し、次に同じタグで `pnpm exec cdk deploy -c asaBuildId=2026-07-05` をデプロイする。タグが存在しない・一致しない場合、ECS タスクはイメージの pull エラーで停止する。
 - `-c asaUpdateOnStart=true` で、タスク起動のたびに SteamCMD で更新する緊急用モードを有効にできる。デフォルトは無効。
 - マップの選択肢は Lambda が検証し、共有の許可リストから登録される。任意の `server/enabled-maps` パラメータで環境ごとのサブセットに制限できる。共有リストまたはこのパラメータを変更したら `pnpm run discord:register` を再実行する。
+- ASA イベント mod は任意の `server/event-mod-id` パラメータで選ぶ。Lambda は起動ごとに値を読み、数値の project ID だけを ECS タスクへ渡し、コンテナが `-mods=<ID>` を起動引数へ追加する。選択中の ID は start/status/info と READY 通知に表示される。
 - 1 スタック内のマップ間転送は非同期方式: クラスターデータはそのスタックの S3 セーブアーカイブに含まれるが、複数マップを同時には動かさない。クロススタック転送はサポートしない。
 - Discord コマンドは即座に deferred 応答を返し、AWS 操作を非同期に実行して、結果を follow-up 応答で返す。準備完了やライフサイクルの通知は設定した Discord webhook に送られる。
 - ステートバケットはバージョニング有効で、非カレントのオブジェクトバージョンはライフサイクルルールにより 7 日で削除される。

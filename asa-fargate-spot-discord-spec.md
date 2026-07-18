@@ -343,11 +343,13 @@ Non-secret parameters:
 /asa/server/session-name
 /asa/server/default-map
 /asa/server/enabled-maps (optional)
+/asa/server/event-mod-id (optional)
 /asa/server/max-players
 ```
 
 `allowed-role-ids` と `allowed-user-ids` は JSON array string とする。
 `enabled-maps` はカンマ区切りのマップ値とする。未設定なら全マップを許可し、制限を解除する場合はパラメータを削除する。変更後は Slash commands を再登録する。
+`event-mod-id` はイベント mod の CurseForge project ID とする。`/asa start` ごとにキャッシュせず読み、数値 ID なら `-mods=<ID>` として次の ECS タスクへ渡す。未設定、削除、または `None` ならイベント mod を指定しない。
 
 例:
 
@@ -752,6 +754,7 @@ ASA_INSTALL_DIR=/asa/server
 ASA_MAP=TheIsland_WP
 ASA_SESSION_NAME=<from SSM or command option>
 ASA_MAX_PLAYERS=4
+ASA_EVENT_MOD_ID=<optional CurseForge project ID from SSM>
 ASA_SERVER_PASSWORD=<secret>
 ASA_ADMIN_PASSWORD=<secret>
 ASA_PORT=7777
@@ -805,11 +808,12 @@ steamcmd \
 ArkAscendedServer.exe \
   "${ASA_MAP}?listen?SessionName=${ASA_SESSION_NAME}?ServerPassword=${ASA_SERVER_PASSWORD}?ServerAdminPassword=${ASA_ADMIN_PASSWORD}?MaxPlayers=${ASA_MAX_PLAYERS}?Port=${ASA_PORT}?RCONEnabled=True?RCONPort=${ASA_RCON_PORT}" \
   -log \
+  "-mods=${ASA_EVENT_MOD_ID}" \
   "-clusterid=${ASA_CLUSTER_ID}" \
   "-ClusterDirOverride=Z:\\asa\\server\\ShooterGame\\Saved\\clusters"
 ```
 
-`ASA_DISABLE_BATTLEYE=true` の場合は `-NoBattlEye` を追加する。
+`ASA_EVENT_MOD_ID` が設定されている場合だけ `-mods=<ID>` を追加する。`ASA_DISABLE_BATTLEYE=true` の場合は `-NoBattlEye` を追加する。
 
 実際には Proton / UMU 経由で `ArkAscendedServer.exe` を起動する。
 
@@ -1131,6 +1135,8 @@ aws ssm put-parameter --name /asa/discord/allowed-role-ids --type String --value
 aws ssm put-parameter --name /asa/discord/allowed-user-ids --type String --value '["..."]'
 aws ssm put-parameter --name /asa/server/session-name --type String --value 'private-asa'
 aws ssm put-parameter --name /asa/server/default-map --type String --value 'TheIsland_WP'
+# Optional; Summer Bash 2026 example. Use None or delete the parameter to disable the event mod.
+aws ssm put-parameter --name /asa/server/event-mod-id --type String --value '927091'
 aws ssm put-parameter --name /asa/server/max-players --type String --value '4'
 ```
 

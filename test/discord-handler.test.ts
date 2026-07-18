@@ -147,6 +147,7 @@ function runningServer() {
     connectCommand: "open 192.0.2.1:7777",
     sessionName: "private-asa",
     mapName: "TheIsland_WP",
+    eventModId: "927091",
     maxPlayers: 4,
     idleTimeoutMinutes: 30,
     idleSince: null,
@@ -287,6 +288,30 @@ describe("Discord interaction handler", () => {
     expect(await runAsyncStart("TheIsland_WP")).toContain("enabled-maps parameter contains unsupported map values: Unknown_WP");
   });
 
+  it("rejects an invalid event mod ID from Parameter Store", async () => {
+    mocks.parameters.set("/asa/server/event-mod-id", "summer-bash");
+
+    const content = await runAsyncStart("TheIsland_WP");
+
+    expect(content).toContain("Configured event-mod-id is invalid");
+    expect(content).toContain("numeric CurseForge project ID or None");
+    expect(mocks.ecsSend).not.toHaveBeenCalled();
+  });
+
+  it("passes the selected event mod ID to the ECS task and stores it", async () => {
+    mocks.parameters.set("/asa/server/session-name", "private-asa");
+    mocks.parameters.set("/asa/server/max-players", "4");
+    mocks.parameters.set("/asa/server/event-mod-id", "927091");
+    mocks.getServer.mockResolvedValue(undefined);
+
+    const content = await runAsyncStart("TheIsland_WP", undefined, false);
+
+    expect(content).toContain("Event: mod 927091");
+    expect(mocks.putServerStarting).toHaveBeenCalledWith(expect.objectContaining({ eventModId: "927091" }), expect.any(String));
+    const runTask = mocks.ecsSend.mock.calls[0][0] as { input: { overrides: { containerOverrides: Array<{ environment: unknown[] }> } } };
+    expect(runTask.input.overrides.containerOverrides[0].environment).toContainEqual({ name: "ASA_EVENT_MOD_ID", value: "927091" });
+  });
+
   it("starts with the default 30-minute idle timeout and a recurring check", async () => {
     mocks.parameters.set("/asa/server/session-name", "private-asa");
     mocks.parameters.set("/asa/server/max-players", "4");
@@ -295,8 +320,9 @@ describe("Discord interaction handler", () => {
     const content = await runAsyncStart("TheIsland_WP", undefined, false);
 
     expect(content).toContain("no players for 30m");
+    expect(content).toContain("Event: not configured");
     expect(mocks.putServerStarting).toHaveBeenCalledWith(
-      expect.objectContaining({ idleTimeoutMinutes: 30, idleSince: null, lastHeartbeatAt: null }),
+      expect.objectContaining({ eventModId: null, idleTimeoutMinutes: 30, idleSince: null, lastHeartbeatAt: null }),
       expect.any(String),
     );
     expect(mocks.putServerStarting.mock.calls[0][0]).not.toHaveProperty("expiresAt");
@@ -306,6 +332,9 @@ describe("Discord interaction handler", () => {
         { name: "IDLE_TIMEOUT_MINUTES", value: "30" },
         { name: "MONTHLY_RUNTIME_HOURS_LIMIT", value: "80" },
       ]),
+    );
+    expect(runTask.input.overrides.containerOverrides[0].environment).not.toContainEqual(
+      expect.objectContaining({ name: "ASA_EVENT_MOD_ID" }),
     );
     const createSchedule = mocks.schedulerSend.mock.calls
       .map(([command]) => command)
@@ -337,6 +366,7 @@ describe("Discord interaction handler", () => {
     });
 
     expect(await runAsyncStatus()).toContain("Players: 2 / 4");
+    expect(await runAsyncStatus()).toContain("Event: mod 927091");
     expect(await runAsyncStatus()).toContain("Auto-stop: no players for 30m / monthly limit 80h");
   });
 

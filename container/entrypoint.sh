@@ -33,6 +33,10 @@ if [[ ! "${ASA_CLUSTER_ID}" =~ ^[A-Za-z0-9_.-]{1,64}$ ]]; then
   echo "ASA_CLUSTER_ID contains unsupported characters." >&2
   exit 2
 fi
+if [[ -n "${ASA_EVENT_MOD_ID:-}" && ! "${ASA_EVENT_MOD_ID}" =~ ^[1-9][0-9]{0,11}$ ]]; then
+  echo "ASA_EVENT_MOD_ID must be a numeric CurseForge project ID." >&2
+  exit 2
+fi
 
 mkdir -p /asa/server /asa/work /asa/tmp /asa/scripts
 
@@ -107,6 +111,9 @@ mkdir -p "${cluster_dir}"
 
 launch_arg="${ASA_MAP}?listen?Port=${ASA_PORT}"
 extra_args=(-log "-WinLiveMaxPlayers=${ASA_MAX_PLAYERS}" "-clusterid=${ASA_CLUSTER_ID}" "-ClusterDirOverride=${cluster_dir_windows}")
+if [[ -n "${ASA_EVENT_MOD_ID:-}" ]]; then
+  extra_args+=("-mods=${ASA_EVENT_MOD_ID}")
+fi
 if [[ "${ASA_DISABLE_BATTLEYE:-true}" == "true" ]]; then
   extra_args+=(-NoBattlEye)
 fi
@@ -172,7 +179,7 @@ heartbeat_loop_pid="$!"
 (
   for _ in $(seq 1 120); do
     if nc -z -w1 127.0.0.1 "${ASA_RCON_PORT}" >/dev/null 2>&1; then
-      notify "ASA server is READY.\nServer: ${ASA_SESSION_NAME}\nMap: ${ASA_MAP}\nAuto-stop: no players for ${IDLE_TIMEOUT_MINUTES:-30}m / monthly limit ${MONTHLY_RUNTIME_HOURS_LIMIT:-80}h"
+      notify "ASA server is READY.\nServer: ${ASA_SESSION_NAME}\nMap: ${ASA_MAP}\nEvent mod: ${ASA_EVENT_MOD_ID:-not configured}\nAuto-stop: no players for ${IDLE_TIMEOUT_MINUTES:-30}m / monthly limit ${MONTHLY_RUNTIME_HOURS_LIMIT:-80}h"
       exit 0
     fi
     sleep 10

@@ -36,6 +36,7 @@ import {
   userIdFromInteraction,
   verifyDiscordSignature,
 } from "../../shared/discord.js";
+import { eventModLabel, parseEventModId } from "../../shared/events.js";
 import { parseHeartbeatJson } from "../../shared/heartbeat.js";
 import { isSupportedAsaMap, parseEnabledMaps } from "../../shared/maps.js";
 import { StateStore } from "../../shared/state.js";
@@ -166,6 +167,12 @@ async function handleStart(interaction: DiscordInteraction) {
     );
   }
   const sessionName = await getParameter(parameterNames.sessionName, "private-asa");
+  let eventModId: string | null;
+  try {
+    eventModId = parseEventModId(await getParameter(parameterNames.eventModId, "", { cache: false }));
+  } catch (error) {
+    return message(`Configured event-mod-id is invalid: ${error instanceof Error ? error.message : String(error)}.`, true);
+  }
   const configuredMaxPlayers = Number(await getParameter(parameterNames.maxPlayers, "4"));
   if (!optionValue<number>(interaction, "max_players") && Number.isFinite(configuredMaxPlayers)) {
     options.maxPlayers = Math.min(Math.max(configuredMaxPlayers, 1), MAX_PLAYERS);
@@ -197,6 +204,7 @@ async function handleStart(interaction: DiscordInteraction) {
     connectCommand: null,
     sessionName,
     mapName: options.map,
+    eventModId,
     maxPlayers: options.maxPlayers,
     idleTimeoutMinutes: options.idleTimeoutMinutes,
     idleSince: null,
@@ -237,6 +245,7 @@ async function handleStart(interaction: DiscordInteraction) {
                 { name: "ASA_MAP", value: options.map },
                 { name: "ASA_SESSION_NAME", value: sessionName },
                 { name: "ASA_MAX_PLAYERS", value: String(options.maxPlayers) },
+                ...(eventModId ? [{ name: "ASA_EVENT_MOD_ID", value: eventModId }] : []),
                 { name: "IDLE_TIMEOUT_MINUTES", value: String(options.idleTimeoutMinutes) },
                 { name: "MONTHLY_RUNTIME_HOURS_LIMIT", value: String(monthlyRuntimeHoursLimit) },
               ],
@@ -274,14 +283,14 @@ async function handleStart(interaction: DiscordInteraction) {
       const webhook = await getSecret(secretNames.notificationWebhookUrl);
       await postWebhook(
         webhook,
-        `ASA server start requested by <@${userId ?? "unknown"}>.\nMap: ${options.map}\nAuto-stop: no players for ${options.idleTimeoutMinutes}m / monthly limit ${monthlyRuntimeHoursLimit}h\nStatus: STARTING`,
+        `ASA server start requested by <@${userId ?? "unknown"}>.\nMap: ${options.map}\nEvent: ${eventModLabel(eventModId)}\nAuto-stop: no players for ${options.idleTimeoutMinutes}m / monthly limit ${monthlyRuntimeHoursLimit}h\nStatus: STARTING`,
       );
     } catch (error) {
       console.error("Failed to post start notification", error);
     }
   }
   return message(
-    `ASA start requested.\nMap: ${options.map}\nAuto-stop: no players for ${options.idleTimeoutMinutes}m / monthly limit ${monthlyRuntimeHoursLimit}h`,
+    `ASA start requested.\nMap: ${options.map}\nEvent: ${eventModLabel(eventModId)}\nAuto-stop: no players for ${options.idleTimeoutMinutes}m / monthly limit ${monthlyRuntimeHoursLimit}h`,
     true,
   );
 }
@@ -337,6 +346,7 @@ async function handleStatus() {
     [
       `Status: ${state.status}`,
       `Map: ${state.mapName}`,
+      `Event: ${eventModLabel(state.eventModId)}`,
       `Players: ${playerCount ?? "unknown"} / ${state.maxPlayers}`,
       `Started: ${state.startedAt ?? "N/A"}`,
       `Auto-stop: no players for ${state.idleTimeoutMinutes}m / monthly limit ${monthlyRuntimeHoursLimit}h`,
@@ -354,9 +364,13 @@ async function handleInfo() {
   if (!state || state.status === "STOPPED") return message("ASA server is stopped.", true);
   const passwordLine = allowDiscordPasswordNotification ? `Password: ${await getSecret(secretNames.serverPassword)}` : "Password: hidden";
   return message(
-    [`Server: ${state.sessionName}`, `Map: ${state.mapName}`, `Connect: ${state.connectCommand ?? "not available"}`, passwordLine].join(
-      "\n",
-    ),
+    [
+      `Server: ${state.sessionName}`,
+      `Map: ${state.mapName}`,
+      `Event: ${eventModLabel(state.eventModId)}`,
+      `Connect: ${state.connectCommand ?? "not available"}`,
+      passwordLine,
+    ].join("\n"),
     true,
   );
 }

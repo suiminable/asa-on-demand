@@ -5,6 +5,7 @@ import { normalizeConfigPrefix, parameterNamesFor, secretNamesFor } from "../src
 import { DEFAULT_IDLE_MINUTES, MAX_IDLE_MINUTES, MIN_IDLE_MINUTES } from "../src/shared/defaults.js";
 import { isAuthorized, verifyDiscordSignature } from "../src/shared/discord.js";
 import { connectCommandForIp, eniIdFromTask, taskStopReason } from "../src/shared/ecs.js";
+import { eventModLabel, parseEventModId } from "../src/shared/events.js";
 import { ASA_MAPS, isSupportedAsaMap, parseEnabledMaps } from "../src/shared/maps.js";
 
 describe("Discord helpers", () => {
@@ -105,7 +106,27 @@ describe("Config helpers", () => {
     expect(normalizeConfigPrefix(" /asa/maps/the-island/ ")).toBe("/asa/maps/the-island");
     expect(parameterNamesFor("/asa/maps/the-island").defaultMap).toBe("/asa/maps/the-island/server/default-map");
     expect(parameterNamesFor("/asa/maps/the-island").enabledMaps).toBe("/asa/maps/the-island/server/enabled-maps");
+    expect(parameterNamesFor("/asa/maps/the-island").eventModId).toBe("/asa/maps/the-island/server/event-mod-id");
     expect(secretNamesFor("/asa/maps/the-island").serverPassword).toBe("/asa/maps/the-island/server/password");
+  });
+});
+
+describe("ASA event mods", () => {
+  it("accepts numeric CurseForge project IDs", () => {
+    expect(parseEventModId(" 927091 ")).toBe("927091");
+    expect(eventModLabel("927091")).toBe("mod 927091");
+  });
+
+  it("treats a missing value or None as no configured event", () => {
+    expect(parseEventModId("")).toBeNull();
+    expect(parseEventModId("None")).toBeNull();
+    expect(eventModLabel(null)).toBe("not configured");
+  });
+
+  it("rejects values that cannot safely be passed as a mod ID", () => {
+    expect(() => parseEventModId("summer-bash")).toThrow("numeric CurseForge project ID or None");
+    expect(() => parseEventModId("0")).toThrow("numeric CurseForge project ID or None");
+    expect(() => parseEventModId("927091,927090")).toThrow("numeric CurseForge project ID or None");
   });
 });
 
