@@ -172,7 +172,7 @@ heartbeat_loop_pid="$!"
 (
   for _ in $(seq 1 120); do
     if nc -z -w1 127.0.0.1 "${ASA_RCON_PORT}" >/dev/null 2>&1; then
-      notify "ASA server is READY.\nServer: ${ASA_SESSION_NAME}\nMap: ${ASA_MAP}\nAuto-stop: ${ASA_EXPIRES_AT:-unknown}"
+      notify "ASA server is READY.\nServer: ${ASA_SESSION_NAME}\nMap: ${ASA_MAP}\nAuto-stop: no players for ${IDLE_TIMEOUT_MINUTES:-30}m / monthly limit ${MONTHLY_RUNTIME_HOURS_LIMIT:-80}h"
       exit 0
     fi
     sleep 10

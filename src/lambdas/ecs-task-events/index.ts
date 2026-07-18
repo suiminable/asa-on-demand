@@ -2,7 +2,7 @@ import { DescribeNetworkInterfacesCommand, EC2Client } from "@aws-sdk/client-ec2
 import { DescribeTasksCommand, ECSClient } from "@aws-sdk/client-ecs";
 import { ChangeResourceRecordSetsCommand, Route53Client } from "@aws-sdk/client-route-53";
 import type { EventBridgeEvent } from "aws-lambda";
-import { monthKey } from "../../shared/budget.js";
+import { runtimeSecondsBetween, splitRuntimeByJstMonth } from "../../shared/budget.js";
 import { getSecret, requireEnv } from "../../shared/config.js";
 import { postWebhook } from "../../shared/discord.js";
 import { connectCommandForIp, eniIdFromTask, taskStopReason } from "../../shared/ecs.js";
@@ -63,13 +63,6 @@ async function updateDns(publicIp: string): Promise<void> {
   );
 }
 
-function runtimeSeconds(startedAt: string | null | undefined, stoppedAt: Date): number {
-  if (!startedAt) return 0;
-  const start = Date.parse(startedAt);
-  if (!Number.isFinite(start)) return 0;
-  return Math.max(0, Math.round((stoppedAt.getTime() - start) / 1000));
-}
-
 function estimateCost(runtime: number): { jpy: number; usd: number } {
   const hours = runtime / 3600;
   const jpy = hours * hourlyCostJpy;
@@ -90,6 +83,7 @@ export async function handler(event: EventBridgeEvent<"ECS Task State Change", E
       connectCommand,
       taskArn: detail.taskArn,
       clusterArn: detail.clusterArn,
+      taskStartedAt: detail.startedAt ?? new Date().toISOString(),
     });
     await postWebhook(
       webhook,
@@ -107,15 +101,21 @@ export async function handler(event: EventBridgeEvent<"ECS Task State Change", E
     const now = new Date();
     const state = await store.getServer();
     const stoppedAt = detail.stoppedAt ? new Date(detail.stoppedAt) : now;
-    const runtime = runtimeSeconds(detail.startedAt ?? state?.startedAt, stoppedAt);
-    const estimated = estimateCost(runtime);
+    const startedAt = detail.startedAt ?? state?.taskStartedAt ?? state?.startedAt;
+    const runtime = runtimeSecondsBetween(startedAt, stoppedAt);
+    const budgets = splitRuntimeByJstMonth(startedAt, stoppedAt).map((slice) => {
+      const estimated = estimateCost(slice.runtimeSeconds);
+      return {
+        budgetPk: slice.budgetPk,
+        runtimeSeconds: slice.runtimeSeconds,
+        estimatedCostJpy: estimated.jpy,
+        estimatedCostUsd: estimated.usd,
+      };
+    });
     const reason = taskStopReason(detail.stoppedReason, detail.containers);
     const settled = await store.settleStoppedTask({
       taskArn: detail.taskArn,
-      budgetPk: monthKey(stoppedAt),
-      runtimeSeconds: runtime,
-      estimatedCostJpy: estimated.jpy,
-      estimatedCostUsd: estimated.usd,
+      budgets,
       reason,
     });
     if (!settled) {

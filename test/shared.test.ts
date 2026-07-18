@@ -1,8 +1,8 @@
 import nacl from "tweetnacl";
 import { describe, expect, it } from "vitest";
-import { canStart, hours, monthKey } from "../src/shared/budget.js";
+import { activeRuntimeSecondsThisMonth, canStart, hours, monthKey, splitRuntimeByJstMonth, startOfJstMonth } from "../src/shared/budget.js";
 import { normalizeConfigPrefix, parameterNamesFor, secretNamesFor } from "../src/shared/config.js";
-import { DEFAULT_SESSION_HOURS, MAX_SESSION_HOURS } from "../src/shared/defaults.js";
+import { DEFAULT_IDLE_MINUTES, MAX_IDLE_MINUTES, MIN_IDLE_MINUTES } from "../src/shared/defaults.js";
 import { isAuthorized, verifyDiscordSignature } from "../src/shared/discord.js";
 import { connectCommandForIp, eniIdFromTask, taskStopReason } from "../src/shared/ecs.js";
 import { ASA_MAPS, isSupportedAsaMap, parseEnabledMaps } from "../src/shared/maps.js";
@@ -39,15 +39,36 @@ describe("Budget helpers", () => {
     expect(hours(5400)).toBe(1.5);
   });
 
-  it("rejects starts that exceed runtime limit", () => {
+  it("rejects starts only after the runtime limit has been reached", () => {
+    const budget = (runtimeSeconds: number) => ({
+      pk: "BUDGET#2026-06",
+      runtimeSeconds,
+      estimatedCostJpy: 0,
+      estimatedCostUsd: 0,
+      startCount: 0,
+      updatedAt: "",
+    });
     expect(
       canStart({
-        budget: { pk: "BUDGET#2026-06", runtimeSeconds: 79 * 3600, estimatedCostJpy: 0, estimatedCostUsd: 0, startCount: 0, updatedAt: "" },
-        requestedHours: 2,
+        budget: budget(80 * 3600),
         monthlyRuntimeHoursLimit: 80,
       }).ok,
     ).toBe(false);
-    expect(canStart({ budget: undefined, requestedHours: 4, monthlyRuntimeHoursLimit: 80 }).ok).toBe(true);
+    expect(canStart({ budget: budget(79 * 3600 + 3599), monthlyRuntimeHoursLimit: 80 }).ok).toBe(true);
+    expect(canStart({ budget: undefined, monthlyRuntimeHoursLimit: 80 }).ok).toBe(true);
+  });
+
+  it("calculates active runtime from the start of the JST month", () => {
+    const now = new Date("2026-07-31T15:10:00.000Z");
+    expect(startOfJstMonth(now).toISOString()).toBe("2026-07-31T15:00:00.000Z");
+    expect(activeRuntimeSecondsThisMonth("2026-07-31T14:50:00.000Z", now)).toBe(10 * 60);
+  });
+
+  it("splits runtime at JST month boundaries", () => {
+    expect(splitRuntimeByJstMonth("2026-07-31T14:00:00.000Z", new Date("2026-07-31T17:00:00.000Z"))).toEqual([
+      { budgetPk: "BUDGET#2026-07", runtimeSeconds: 3600 },
+      { budgetPk: "BUDGET#2026-08", runtimeSeconds: 7200 },
+    ]);
   });
 });
 
@@ -104,9 +125,10 @@ describe("ASA maps", () => {
   });
 });
 
-describe("Session defaults", () => {
-  it("uses an 8-hour default and a 48-hour maximum", () => {
-    expect(DEFAULT_SESSION_HOURS).toBe(8);
-    expect(MAX_SESSION_HOURS).toBe(48);
+describe("Idle defaults", () => {
+  it("uses a 30-minute default and the documented range", () => {
+    expect(DEFAULT_IDLE_MINUTES).toBe(30);
+    expect(MIN_IDLE_MINUTES).toBe(1);
+    expect(MAX_IDLE_MINUTES).toBe(1440);
   });
 });

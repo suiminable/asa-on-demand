@@ -287,12 +287,15 @@ Partition key:
   "taskArn": "string | null",
   "clusterArn": "string | null",
   "startedAt": "ISO8601 | null",
-  "expiresAt": "ISO8601 | null",
+  "taskStartedAt": "ISO8601 | null",
   "publicIp": "string | null",
   "connectCommand": "open x.x.x.x:7777 | null",
   "sessionName": "string",
   "mapName": "TheIsland_WP",
   "maxPlayers": 4,
+  "idleTimeoutMinutes": 30,
+  "idleSince": "ISO8601 | null",
+  "lastHeartbeatAt": "ISO8601 | null",
   "startedByDiscordUserId": "string | null",
   "startedFromChannelId": "string | null",
   "lastBackupAt": "ISO8601 | null",
@@ -398,7 +401,7 @@ Command handling:
 
 | Option | Type | Default | Validation |
 |---|---|---:|---|
-| `duration_hours` | integer | `8` | `1 <= n <= 48` |
+| `idle_minutes` | integer | `30` | `1 <= n <= 1440` |
 | `map` | string choice | `TheIsland_WP` | allowlist |
 | `max_players` | integer | `4` | `1 <= n <= 8` |
 | `session_name` | string | SSM default | max 50 chars |
@@ -443,7 +446,7 @@ RUNNING event handling:
 STOPPED event handling:
 
 1. DynamoDB `SERVER` を `STOPPED` に更新する。
-2. runtime seconds を今月の `BUDGET#YYYY-MM` に加算する。
+2. runtime seconds を JST の月境界で分割し、各月の `BUDGET#YYYY-MM` に加算する。
 3. stopped reason を記録する。
 4. Discord に停止通知を送る。
 
@@ -451,24 +454,23 @@ STOPPED event handling:
 
 Purpose:
 
-- TTL到達時または `/asa stop` から ECS task を停止する。
+- 毎分 heartbeat と月間稼働時間を評価し、条件到達時に ECS task を停止する。
 
 Input:
 
 ```json
 {
-  "reason": "USER_REQUEST | TTL_EXPIRED | BUDGET_EXCEEDED",
-  "requestedByDiscordUserId": "string | null"
+  "source": "IDLE_CHECK"
 }
 ```
 
 処理:
 
 1. DynamoDB `SERVER` を読む。
-2. `RUNNING` または `STARTING` で taskArn がある場合だけ停止する。
-3. `StopTask` を呼ぶ。
-4. `STOPPING` に更新する。
-5. Discord に停止開始を通知する。
+2. 当月の精算済み runtime と現在タスクの当月分を合算し、月上限到達時は停止する。
+3. `RUNNING` の場合は fresh かつ時刻の異なる heartbeat の連続 0 人区間を評価する。
+4. `idleTimeoutMinutes` 到達時は停止する。欠落・古い・不正な heartbeat では停止しない。
+5. 停止時は `StopTask` を呼び、`STOPPING` に更新して Discord へ通知する。
 
 ### 4.8.4 Optional: BackupRequestLambda
 
@@ -490,16 +492,14 @@ Option B:
 
 ## 4.9 EventBridge Scheduler
 
-`/asa start` 時に one-time schedule を作る。
+`/asa start` 時に定期 schedule を作る。
 
 例:
 
 ```text
-start time: now
-expiresAt: now + duration_hours
-schedule: at(expiresAt)
+schedule: rate(1 minute)
 target: StopServerLambda
-payload: { "reason": "TTL_EXPIRED" }
+payload: { "source": "IDLE_CHECK" }
 ```
 
 サーバー停止時は schedule を削除する。
@@ -562,12 +562,12 @@ Options:
 ```json
 [
   {
-    "name": "duration_hours",
-    "description": "Auto-stop after this many hours",
+    "name": "idle_minutes",
+    "description": "Auto-stop after this many minutes with no players",
     "type": 4,
     "required": false,
     "min_value": 1,
-    "max_value": 48
+    "max_value": 1440
   },
   {
     "name": "map",
@@ -633,14 +633,14 @@ Status: RUNNING
 Map: TheIsland_WP
 Players: unknown
 Started: 2026-06-24T12:00:00+09:00
-Expires: 2026-06-24T20:00:00+09:00
+Auto-stop: no players for 30m / monthly limit 80h
 Connect: open x.x.x.x:7777
 This month: 12.3h / configured limit
 Estimated cost: ¥xxx
 ```
 
-Player count は初期実装では unknown でよい。
-将来 RCON / query による取得を追加する。
+Player count は fresh な `runtime/heartbeat.json` から取得し、欠落・不正・鮮度切れは
+unknown と表示する。
 
 ### `/asa info`
 
@@ -686,7 +686,7 @@ Returns:
 ```text
 ASA server start requested by <user>.
 Map: TheIsland_WP
-TTL: 8h
+Auto-stop: no players for 30m / monthly limit 80h
 Status: STARTING
 ```
 
@@ -708,7 +708,7 @@ ASA server is READY.
 Server: <session name>
 Map: TheIsland_WP
 Connect: open x.x.x.x:7777
-Auto-stop: 2026-06-24 16:00 JST
+Auto-stop: no players for 30m / monthly limit 80h
 ```
 
 ### 停止開始
@@ -887,18 +887,17 @@ CDK context:
 {
   "monthlyBudgetJpy": 1500,
   "monthlyRuntimeHoursLimit": 80,
-  "maxSessionHours": 48,
-  "defaultSessionHours": 8
+  "defaultIdleMinutes": 30
 }
 ```
 
 `/asa start` 時に以下をチェックする。
 
 - 今月の runtime が `monthlyRuntimeHoursLimit` を超えていないか。
-- 今回の `duration_hours` を足すと超えるか。
 - すでに task が起動中ではないか。
 
-超える場合は起動しない。
+上限到達済みの場合は起動しない。残量があれば起動を許可し、稼働中は毎分
+`monthlyRuntimeHoursLimit` を評価して到達時に停止する。
 
 ## 7.3 AWS Budgets optional
 
@@ -1174,13 +1173,13 @@ npm run discord:register
 
 ## 12.1 起動
 
-1. User runs `/asa start duration_hours:8`.
+1. User runs `/asa start idle_minutes:30`.
 2. Lambda validates signature and permissions.
 3. Lambda checks DynamoDB state.
 4. Lambda checks budget guard.
 5. Lambda updates state to `STARTING` conditionally.
 6. Lambda runs ECS task with Fargate Spot.
-7. Lambda creates one-time stop schedule.
+7. Lambda creates a one-minute recurring idle/budget check schedule.
 8. Lambda returns deferred Discord response.
 9. EventBridge sees task `RUNNING`.
 10. EcsTaskEventsLambda resolves public IP and posts Discord notification.
@@ -1189,7 +1188,7 @@ npm run discord:register
 
 ## 12.2 停止
 
-1. User runs `/asa stop` or TTL schedule fires.
+1. User runs `/asa stop`, or the idle/monthly check reaches a stop condition.
 2. StopServerLambda calls `StopTask`.
 3. ECS sends SIGTERM to container.
 4. Container runs final backup.
@@ -1262,7 +1261,7 @@ Retention:
 | S3 restore fails due to access error | task exits |
 | Ready timeout | Discord に warning。task は継続 |
 | Backup fails | Discord に warning。task は継続 |
-| TTL stop fails | Discord に warning。次回 status で検出 |
+| Idle/monthly stop fails | Lambda error を記録し、定期 schedule で再試行 |
 | ECS task exits unexpectedly | EventBridge で STOPPED に更新 |
 
 ## 16. Testing requirements
@@ -1299,7 +1298,7 @@ Retention:
 ## 16.4 Manual integration tests
 
 1. `/asa status` が `STOPPED` を返す。
-2. `/asa start duration_hours:1` で ECS task が作られる。
+2. `/asa start idle_minutes:30` で ECS task が作られる。
 3. Discord に STARTING 通知が来る。
 4. ECS task が RUNNING になり public IP が通知される。
 5. ASA READY 通知が来る。
@@ -1323,7 +1322,7 @@ Codex は以下の順で実装すること。
 8. EcsTaskEventsLambda を実装する。
 9. API Gateway HTTP API を Lambda に接続する。
 10. EventBridge ECS Task State Change rule を作る。
-11. EventBridge Scheduler one-time stop を start command から作る。
+11. EventBridge Scheduler の毎分 idle/budget check を start command から作る。
 12. Discord command registration script を作る。
 13. container scripts を作る。
 14. README に setup/deploy/runbook を書く。

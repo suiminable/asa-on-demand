@@ -85,13 +85,22 @@ describe("AsaFargateStack", () => {
     template.hasResourceProperties("AWS::Lambda::Function", {
       Environment: {
         Variables: Match.objectLike({
-          DEFAULT_SESSION_HOURS: "8",
-          MAX_SESSION_HOURS: "48",
+          DEFAULT_IDLE_MINUTES: "30",
+          HEARTBEAT_FRESHNESS_SECONDS: "180",
           HOURLY_COST_JPY: "52",
           SPOT_HOURLY_COST_JPY: "17",
         }),
       },
     });
+  });
+
+  it("configures and validates the default idle timeout", () => {
+    const template = synthTemplate({ defaultIdleMinutes: 45 });
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: { Variables: Match.objectLike({ DEFAULT_IDLE_MINUTES: "45" }) },
+    });
+    expect(() => synthTemplate({ defaultIdleMinutes: 0 })).toThrow("defaultIdleMinutes must be an integer from 1 to 1440");
+    expect(() => synthTemplate({ defaultIdleMinutes: 1.5 })).toThrow("defaultIdleMinutes must be an integer from 1 to 1440");
   });
 
   it("allows the Discord Lambda to invoke its exact function ARN", () => {
@@ -173,6 +182,7 @@ describe("AsaFargateStack", () => {
             { Name: "S3_CONFIG_PREFIX", Value: "config/" },
             { Name: "S3_RUNTIME_PREFIX", Value: "runtime/" },
             { Name: "BACKUP_REQUEST_KEY", Value: "runtime/backup-request.json" },
+            { Name: "HEARTBEAT_KEY", Value: "runtime/heartbeat.json" },
           ]),
         }),
       ]),
@@ -190,6 +200,7 @@ describe("AsaFargateStack", () => {
             { Name: "S3_CONFIG_PREFIX", Value: "maps/the-island/config/" },
             { Name: "S3_RUNTIME_PREFIX", Value: "maps/the-island/runtime/" },
             { Name: "BACKUP_REQUEST_KEY", Value: "maps/the-island/runtime/backup-request.json" },
+            { Name: "HEARTBEAT_KEY", Value: "maps/the-island/runtime/heartbeat.json" },
           ]),
         }),
       ]),

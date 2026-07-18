@@ -3,7 +3,7 @@ import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CreateScheduleCommand, DeleteScheduleCommand, SchedulerClient } from "@aws-sdk/client-scheduler";
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from "aws-lambda";
-import { canStart, hours, monthKey } from "../../shared/budget.js";
+import { canStart, currentMonthRuntimeSeconds, hours, monthKey } from "../../shared/budget.js";
 import {
   getJsonArrayParameter,
   getParameter,
@@ -13,7 +13,14 @@ import {
   requireEnv,
   secretNamesFor,
 } from "../../shared/config.js";
-import { DEFAULT_MAX_PLAYERS, DEFAULT_SESSION_HOURS, MAX_PLAYERS, MAX_SESSION_HOURS } from "../../shared/defaults.js";
+import {
+  DEFAULT_IDLE_MINUTES,
+  DEFAULT_MAX_PLAYERS,
+  HEARTBEAT_FRESHNESS_SECONDS,
+  MAX_IDLE_MINUTES,
+  MAX_PLAYERS,
+  MIN_IDLE_MINUTES,
+} from "../../shared/defaults.js";
 import {
   type DiscordInteraction,
   deferred,
@@ -29,6 +36,7 @@ import {
   userIdFromInteraction,
   verifyDiscordSignature,
 } from "../../shared/discord.js";
+import { parseHeartbeatJson } from "../../shared/heartbeat.js";
 import { isSupportedAsaMap, parseEnabledMaps } from "../../shared/maps.js";
 import { StateStore } from "../../shared/state.js";
 import type { ServerState } from "../../shared/types.js";
@@ -49,15 +57,14 @@ const bucketName = requireEnv("S3_BUCKET");
 const s3RuntimePrefix = process.env.S3_RUNTIME_PREFIX ?? "runtime/";
 const parameterNames = parameterNamesFor(process.env.CONFIG_PREFIX);
 const secretNames = secretNamesFor(process.env.CONFIG_PREFIX);
-const maxSessionHours = intEnv("MAX_SESSION_HOURS", MAX_SESSION_HOURS);
-const defaultSessionHours = intEnv("DEFAULT_SESSION_HOURS", DEFAULT_SESSION_HOURS);
+const defaultIdleMinutes = intEnv("DEFAULT_IDLE_MINUTES", DEFAULT_IDLE_MINUTES);
 const monthlyRuntimeHoursLimit = intEnv("MONTHLY_RUNTIME_HOURS_LIMIT", 80);
 const spotHourlyCostJpy = Number(process.env.SPOT_HOURLY_COST_JPY ?? "17");
 const enableOnDemandFallback = process.env.ENABLE_ON_DEMAND_FALLBACK === "true";
 const allowDiscordPasswordNotification = process.env.ALLOW_DISCORD_PASSWORD_NOTIFICATION === "true";
 const functionName = requireEnv("AWS_LAMBDA_FUNCTION_NAME");
 const startingStaleMs = 10 * 60 * 1000;
-const heartbeatFreshnessMs = 180 * 1000;
+const heartbeatFreshnessSeconds = intEnv("HEARTBEAT_FRESHNESS_SECONDS", HEARTBEAT_FRESHNESS_SECONDS);
 
 interface AsyncCommandEvent {
   source: "asa.discord.command";
@@ -94,17 +101,14 @@ function rawBody(event: APIGatewayProxyEventV2): string {
 }
 
 function startOptions(interaction: DiscordInteraction) {
-  const durationHours = Math.min(
-    Math.max(Number(optionValue<number>(interaction, "duration_hours") ?? defaultSessionHours), 1),
-    maxSessionHours,
-  );
+  const idleTimeoutMinutes = Number(optionValue<number>(interaction, "idle_minutes") ?? defaultIdleMinutes);
   const map = optionValue<string>(interaction, "map") ?? "TheIsland_WP";
   const maxPlayers = Math.min(Math.max(Number(optionValue<number>(interaction, "max_players") ?? DEFAULT_MAX_PLAYERS), 1), MAX_PLAYERS);
   const publicNotify = optionValue<boolean>(interaction, "public_notify") ?? true;
-  return { durationHours, map, maxPlayers, publicNotify };
+  return { idleTimeoutMinutes, map, maxPlayers, publicNotify };
 }
 
-async function createStopSchedule(expiresAt: Date): Promise<void> {
+async function createStopSchedule(): Promise<void> {
   await scheduler
     .send(
       new DeleteScheduleCommand({
@@ -118,13 +122,12 @@ async function createStopSchedule(expiresAt: Date): Promise<void> {
       Name: stopScheduleName,
       GroupName: "default",
       FlexibleTimeWindow: { Mode: "OFF" },
-      ScheduleExpression: `at(${expiresAt.toISOString().replace(/\.\d{3}Z$/, "")})`,
+      ScheduleExpression: "rate(1 minute)",
       Target: {
         Arn: requireEnv("STOP_SERVER_FUNCTION_ARN"),
         RoleArn: stopSchedulerRoleArn,
-        Input: JSON.stringify({ reason: "TTL_EXPIRED", requestedByDiscordUserId: null }),
+        Input: JSON.stringify({ source: "IDLE_CHECK" }),
       },
-      ActionAfterCompletion: "DELETE",
     }),
   );
 }
@@ -136,6 +139,13 @@ async function deleteStopSchedule(): Promise<void> {
 async function handleStart(interaction: DiscordInteraction) {
   const now = new Date();
   const options = startOptions(interaction);
+  if (
+    !Number.isInteger(options.idleTimeoutMinutes) ||
+    options.idleTimeoutMinutes < MIN_IDLE_MINUTES ||
+    options.idleTimeoutMinutes > MAX_IDLE_MINUTES
+  ) {
+    return message(`idle_minutes must be an integer from ${MIN_IDLE_MINUTES} to ${MAX_IDLE_MINUTES}.`, true);
+  }
   const defaultMap = await getParameter(parameterNames.defaultMap, "TheIsland_WP");
   if (!optionValue<string>(interaction, "map")) options.map = defaultMap;
   const enabledMaps = parseEnabledMaps(await getParameter(parameterNames.enabledMaps, ""));
@@ -172,10 +182,9 @@ async function handleStart(interaction: DiscordInteraction) {
   }
   const budgetPk = monthKey(now);
   const budget = await store.getBudget(budgetPk);
-  const budgetDecision = canStart({ budget, requestedHours: options.durationHours, monthlyRuntimeHoursLimit });
+  const budgetDecision = canStart({ budget, monthlyRuntimeHoursLimit });
   if (!budgetDecision.ok) return message(budgetDecision.reason, true);
 
-  const expiresAt = new Date(now.getTime() + options.durationHours * 60 * 60 * 1000);
   const userId = userIdFromInteraction(interaction) ?? null;
   const state: ServerState = {
     pk: "SERVER",
@@ -183,12 +192,15 @@ async function handleStart(interaction: DiscordInteraction) {
     taskArn: null,
     clusterArn,
     startedAt: now.toISOString(),
-    expiresAt: expiresAt.toISOString(),
+    taskStartedAt: null,
     publicIp: null,
     connectCommand: null,
     sessionName,
     mapName: options.map,
     maxPlayers: options.maxPlayers,
+    idleTimeoutMinutes: options.idleTimeoutMinutes,
+    idleSince: null,
+    lastHeartbeatAt: null,
     startedByDiscordUserId: userId,
     startedFromChannelId: interaction.channel_id ?? null,
     lastBackupAt: null,
@@ -225,7 +237,8 @@ async function handleStart(interaction: DiscordInteraction) {
                 { name: "ASA_MAP", value: options.map },
                 { name: "ASA_SESSION_NAME", value: sessionName },
                 { name: "ASA_MAX_PLAYERS", value: String(options.maxPlayers) },
-                { name: "ASA_EXPIRES_AT", value: expiresAt.toISOString() },
+                { name: "IDLE_TIMEOUT_MINUTES", value: String(options.idleTimeoutMinutes) },
+                { name: "MONTHLY_RUNTIME_HOURS_LIMIT", value: String(monthlyRuntimeHoursLimit) },
               ],
             },
           ],
@@ -244,7 +257,7 @@ async function handleStart(interaction: DiscordInteraction) {
 
   try {
     await store.updateServerStatus("STARTING", { taskArn });
-    await createStopSchedule(expiresAt);
+    await createStopSchedule();
   } catch (error) {
     await ecs
       .send(new StopTaskCommand({ cluster: clusterArn, task: taskArn, reason: "START_ROLLBACK after initialization failure" }))
@@ -261,13 +274,16 @@ async function handleStart(interaction: DiscordInteraction) {
       const webhook = await getSecret(secretNames.notificationWebhookUrl);
       await postWebhook(
         webhook,
-        `ASA server start requested by <@${userId ?? "unknown"}>.\nMap: ${options.map}\nTTL: ${options.durationHours}h\nStatus: STARTING`,
+        `ASA server start requested by <@${userId ?? "unknown"}>.\nMap: ${options.map}\nAuto-stop: no players for ${options.idleTimeoutMinutes}m / monthly limit ${monthlyRuntimeHoursLimit}h\nStatus: STARTING`,
       );
     } catch (error) {
       console.error("Failed to post start notification", error);
     }
   }
-  return message(`ASA start requested.\nMap: ${options.map}\nAuto-stop: ${expiresAt.toISOString()}`, true);
+  return message(
+    `ASA start requested.\nMap: ${options.map}\nAuto-stop: no players for ${options.idleTimeoutMinutes}m / monthly limit ${monthlyRuntimeHoursLimit}h`,
+    true,
+  );
 }
 
 async function handleStop(interaction: DiscordInteraction) {
@@ -294,29 +310,25 @@ async function handleStop(interaction: DiscordInteraction) {
 }
 
 async function handleStatus() {
+  const now = new Date();
   const state = await store.getServer();
-  const budget = await store.getBudget(monthKey());
-  const runtimeSeconds = budget?.runtimeSeconds ?? 0;
+  const budget = await store.getBudget(monthKey(now));
+  const runtimeSeconds = currentMonthRuntimeSeconds({
+    budget,
+    taskStartedAt: state?.status === "RUNNING" || state?.status === "STARTING" ? (state.taskStartedAt ?? state.startedAt) : undefined,
+    now,
+  });
   if (!state) return message("Status: STOPPED\nThis month: 0h", true);
   let playerCount: number | undefined;
   if (state.status === "RUNNING") {
     try {
       const object = await s3.send(new GetObjectCommand({ Bucket: bucketName, Key: `${s3RuntimePrefix}heartbeat.json` }));
-      const heartbeat = JSON.parse((await object.Body?.transformToString()) ?? "") as {
-        playerCount?: unknown;
-        updatedAt?: unknown;
-      };
-      const updatedAt = typeof heartbeat.updatedAt === "string" ? Date.parse(heartbeat.updatedAt) : Number.NaN;
-      const ageMs = Date.now() - updatedAt;
-      if (
-        Number.isInteger(heartbeat.playerCount) &&
-        (heartbeat.playerCount as number) >= 0 &&
-        Number.isFinite(updatedAt) &&
-        ageMs >= 0 &&
-        ageMs <= heartbeatFreshnessMs
-      ) {
-        playerCount = heartbeat.playerCount as number;
-      }
+      const heartbeat = parseHeartbeatJson(await object.Body?.transformToString(), {
+        now,
+        startedAt: state.startedAt,
+        freshnessSeconds: heartbeatFreshnessSeconds,
+      });
+      playerCount = heartbeat?.playerCount;
     } catch {
       // Missing, stale, or malformed heartbeats fall back to unknown.
     }
@@ -327,7 +339,7 @@ async function handleStatus() {
       `Map: ${state.mapName}`,
       `Players: ${playerCount ?? "unknown"} / ${state.maxPlayers}`,
       `Started: ${state.startedAt ?? "N/A"}`,
-      `Expires: ${state.expiresAt ?? "N/A"}`,
+      `Auto-stop: no players for ${state.idleTimeoutMinutes}m / monthly limit ${monthlyRuntimeHoursLimit}h`,
       `Connect: ${state.connectCommand ?? "not available"}`,
       `This month: ${hours(runtimeSeconds)}h / ${monthlyRuntimeHoursLimit}h`,
       `Estimated cost (conservative): ¥${Math.round(budget?.estimatedCostJpy ?? 0)}`,
@@ -366,8 +378,13 @@ async function handleBackup() {
 }
 
 async function handleBudget() {
-  const budget = await store.getBudget(monthKey());
-  const runtimeSeconds = budget?.runtimeSeconds ?? 0;
+  const now = new Date();
+  const [budget, state] = await Promise.all([store.getBudget(monthKey(now)), store.getServer()]);
+  const runtimeSeconds = currentMonthRuntimeSeconds({
+    budget,
+    taskStartedAt: state?.status === "RUNNING" || state?.status === "STARTING" ? (state.taskStartedAt ?? state.startedAt) : undefined,
+    now,
+  });
   return message(
     [
       `Starts: ${budget?.startCount ?? 0}`,

@@ -1,35 +1,27 @@
 import { execFileSync } from "node:child_process";
-import { MAX_PLAYERS, MAX_SESSION_HOURS } from "../src/shared/defaults.js";
+import { MAX_IDLE_MINUTES, MAX_PLAYERS, MIN_IDLE_MINUTES } from "../src/shared/defaults.js";
 import { ASA_MAPS, isSupportedAsaMap, parseEnabledMaps } from "../src/shared/maps.js";
 
 interface Arguments {
   profile?: string;
   resourcePrefix: string;
-  maxSessionHours: number;
 }
 
 function parseArguments(argv: string[]): Arguments {
-  const args: Arguments = { resourcePrefix: "", maxSessionHours: MAX_SESSION_HOURS };
+  const args: Arguments = { resourcePrefix: "" };
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
     if (value === "--") continue;
     if (value === "--help") {
-      console.log("Usage: pnpm run discord:register [--profile PROFILE] [--resourcePrefix PREFIX] [--maxSessionHours HOURS]");
+      console.log("Usage: pnpm run discord:register [--profile PROFILE] [--resourcePrefix PREFIX]");
       process.exit(0);
     }
-    if (
-      value !== "--profile" &&
-      value !== "--resource-prefix" &&
-      value !== "--resourcePrefix" &&
-      value !== "--max-session-hours" &&
-      value !== "--maxSessionHours"
-    ) {
+    if (value !== "--profile" && value !== "--resource-prefix" && value !== "--resourcePrefix") {
       throw new Error(`Unknown argument: ${value}`);
     }
     const next = argv[index + 1];
     if (!next) throw new Error(`${value} requires a value.`);
     if (value === "--profile") args.profile = next;
-    else if (value === "--max-session-hours" || value === "--maxSessionHours") args.maxSessionHours = Number(next);
     else args.resourcePrefix = next;
     index += 1;
   }
@@ -60,9 +52,6 @@ function optionalParameter(name: string, profile?: string): string {
 }
 
 const args = parseArguments(process.argv.slice(2));
-if (!Number.isInteger(args.maxSessionHours) || args.maxSessionHours < 1) {
-  throw new Error("maxSessionHours must be a positive integer.");
-}
 const resourcePrefix = args.resourcePrefix.trim().replace(/^\/+|\/+$/g, "");
 if (resourcePrefix && !/^[A-Za-z0-9_./-]+$/.test(resourcePrefix)) {
   throw new Error("Resource prefix contains unsupported characters.");
@@ -105,12 +94,12 @@ const commands = [
         type: 1,
         options: [
           {
-            name: "duration_hours",
-            description: "Auto-stop after this many hours",
+            name: "idle_minutes",
+            description: "Auto-stop after this many minutes with no players",
             type: 4,
             required: false,
-            min_value: 1,
-            max_value: args.maxSessionHours,
+            min_value: MIN_IDLE_MINUTES,
+            max_value: MAX_IDLE_MINUTES,
           },
           {
             name: "map",
