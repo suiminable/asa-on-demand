@@ -13,17 +13,6 @@ sections = {
         "ServerAdminPassword": os.environ["ASA_ADMIN_PASSWORD"],
         "RCONEnabled": "True",
         "RCONPort": os.environ["ASA_RCON_PORT"],
-        "noTributeDownloads": "False",
-        "PreventDownloadDinos": "False",
-        "PreventDownloadItems": "False",
-        "PreventDownloadSurvivors": "False",
-        "PreventUploadDinos": "False",
-        "PreventUploadItems": "False",
-        "PreventUploadSurvivors": "False",
-        "TributeCharacterExpirationSeconds": os.environ.get("TRIBUTE_CHARACTER_EXPIRATION_SECONDS", "86400"),
-        "TributeDinoExpirationSeconds": os.environ.get("TRIBUTE_DINO_EXPIRATION_SECONDS", "86400"),
-        "TributeItemExpirationSeconds": os.environ.get("TRIBUTE_ITEM_EXPIRATION_SECONDS", "86400"),
-        "MinimumDinoReuploadInterval": os.environ.get("MINIMUM_DINO_REUPLOAD_INTERVAL", "0"),
     },
 }
 
@@ -54,10 +43,4 @@ for section, settings in sections.items():
 
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-print(
-    "Forced Cross-ARK policy: downloads/uploads enabled; "
-    f"character={sections['ServerSettings']['TributeCharacterExpirationSeconds']}s, "
-    f"dino={sections['ServerSettings']['TributeDinoExpirationSeconds']}s, "
-    f"item={sections['ServerSettings']['TributeItemExpirationSeconds']}s, "
-    f"minimum-dino-reupload={sections['ServerSettings']['MinimumDinoReuploadInterval']}s"
-)
+print("Configured runtime-managed session, credentials, and RCON settings; transfer settings preserved from INI.")

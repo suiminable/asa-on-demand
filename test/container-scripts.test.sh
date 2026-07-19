@@ -45,7 +45,7 @@ printf '[ServerSettings]\nServerAdminPassword=legacy-secret\n' \
   >"${legacy_root}/Saved/Config/WindowsServer/GameUserSettings.ini"
 tar --zstd -cf "${fake_s3}/${bucket}/${prefix}saves/current.tar.zst" -C "${legacy_root}" Saved
 legacy_checksum="$(sha256sum "${fake_s3}/${bucket}/${prefix}saves/current.tar.zst" | cut -d' ' -f1)"
-printf '[ServerSettings]\nCommonSetting=common\nPreventDownloadItems=True\n' \
+printf '[ServerSettings]\nCommonSetting=common\nnoTributeDownloads=True\nPreventDownloadDinos=True\nPreventDownloadItems=True\nPreventDownloadSurvivors=True\nTributeCharacterExpirationSeconds=43200\nTributeDinoExpirationSeconds=21600\n' \
   >"${fake_s3}/${bucket}/${prefix}config/GameUserSettings.ini"
 printf '[/Script/ShooterGame.ShooterGameMode]\nCommonGameSetting=1\n' \
   >"${fake_s3}/${bucket}/${prefix}config/Game.ini"
@@ -87,7 +87,7 @@ for map_id in the-island scorched-earth; do
   assert_file_content "${extracted}/Saved/SavedArks/TheIsland_WP.ark" "legacy-island-world"
 done
 
-assert_file_content "${fake_s3}/${bucket}/${prefix}config/common/GameUserSettings.ini" $'[ServerSettings]\nCommonSetting=common\nPreventDownloadItems=True'
+assert_file_content "${fake_s3}/${bucket}/${prefix}config/common/GameUserSettings.ini" $'[ServerSettings]\nCommonSetting=common\nnoTributeDownloads=True\nPreventDownloadDinos=True\nPreventDownloadItems=True\nPreventDownloadSurvivors=True\nTributeCharacterExpirationSeconds=43200\nTributeDinoExpirationSeconds=21600'
 jq -e --arg clusterId "${cluster_id}" \
   '.schemaVersion == 2 and .clusterId == $clusterId and .mapIds == ["the-island", "scorched-earth"]' \
   "${fake_s3}/${bucket}/${prefix}migration/parallel-storage-v2.json" >/dev/null
@@ -103,7 +103,7 @@ assert_file_content "${pre_migration}/survivor.arkprofile" "survivor-v1"
   || fail "retried migration changed the runtime UID/GID"
 
 mkdir -p "${fake_s3}/${bucket}/${prefix}config/maps/the-island"
-printf '[ServerSettings]\nMapSetting=island\nPreventUploadItems=True\n' \
+printf '[ServerSettings]\nMapSetting=island\nPreventUploadDinos=True\nPreventUploadItems=True\nPreventUploadSurvivors=True\nTributeItemExpirationSeconds=10800\nMinimumDinoReuploadInterval=600\n' \
   >"${fake_s3}/${bucket}/${prefix}config/maps/the-island/GameUserSettings.ini"
 printf '[/Script/ShooterGame.ShooterGameMode]\nMapGameSetting=2\n' \
   >"${fake_s3}/${bucket}/${prefix}config/maps/the-island/Game.ini"
@@ -148,23 +148,21 @@ env \
 user_settings="${restore_install}/ShooterGame/Saved/Config/WindowsServer/GameUserSettings.ini"
 grep -Fqx 'CommonSetting=common' "${user_settings}" || fail "common config was not retained"
 grep -Fqx 'MapSetting=island' "${user_settings}" || fail "Map overlay was not retained"
-for forced_false in \
-  noTributeDownloads \
-  PreventDownloadDinos \
-  PreventDownloadItems \
-  PreventDownloadSurvivors \
-  PreventUploadDinos \
-  PreventUploadItems \
-  PreventUploadSurvivors; do
-  [[ "$(grep -Eic "^${forced_false}=" "${user_settings}")" == "1" ]] || fail "${forced_false} was missing or duplicated"
-  grep -Fqxi "${forced_false}=False" "${user_settings}" || fail "${forced_false} did not force transfers on"
-done
-for expiration in \
-  TributeCharacterExpirationSeconds=86400 \
-  TributeDinoExpirationSeconds=86400 \
-  TributeItemExpirationSeconds=86400 \
-  MinimumDinoReuploadInterval=0; do
-  grep -Fqx "${expiration}" "${user_settings}" || fail "cluster-wide expiration setting ${expiration} is missing"
+for transfer_setting in \
+  noTributeDownloads=True \
+  PreventDownloadDinos=True \
+  PreventDownloadItems=True \
+  PreventDownloadSurvivors=True \
+  PreventUploadDinos=True \
+  PreventUploadItems=True \
+  PreventUploadSurvivors=True \
+  TributeCharacterExpirationSeconds=43200 \
+  TributeDinoExpirationSeconds=21600 \
+  TributeItemExpirationSeconds=10800 \
+  MinimumDinoReuploadInterval=600; do
+  transfer_key="${transfer_setting%%=*}"
+  [[ "$(grep -Eic "^${transfer_key}=" "${user_settings}")" == "1" ]] || fail "${transfer_key} was missing or duplicated"
+  grep -Fqx "${transfer_setting}" "${user_settings}" || fail "transfer setting ${transfer_setting} was overwritten"
 done
 grep -Fqx 'SessionName=fixture-the-island' "${user_settings}" || fail "forced session name was not applied"
 

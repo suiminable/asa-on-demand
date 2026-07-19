@@ -17,7 +17,7 @@ ASA_TEST_IMAGE=ACCOUNT.dkr.ecr.ap-northeast-1.amazonaws.com/REPOSITORY:BUILD_ID 
 
 - legacy archive を 2 つの Map archive と EFS cluster directory に分割できること
 - デフォルトでは上書きせず、明示的に許可した retry では以前の EFS directory を退避すること
-- runtime UID/GID ownership、安全な展開、common/Map config の適用順、強制 transfer 設定
+- runtime UID/GID ownership、安全な展開、common/Map config の適用順、transfer 設定の保持
 - `Saved/clusters` を含まない Map ごとの独立した backup
 - legacy rollback export と復元済み cluster の昇格
 - ECS migration wrapper の task input と schema v2 初期化呼び出し

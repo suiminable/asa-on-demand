@@ -17,7 +17,7 @@ The test runs the current repository scripts in the container as the dedicated m
 
 - legacy archive split into two Map archives plus an EFS cluster directory;
 - non-overwrite behavior and an explicitly approved retry with preservation of the previous EFS directory;
-- runtime UID/GID ownership, safe extraction, common/Map config order, and forced transfer settings;
+- runtime UID/GID ownership, safe extraction, common/Map config order, and preservation of transfer settings;
 - independent Map backups without `Saved/clusters`;
 - legacy rollback export and recovered-cluster promotion;
 - the ECS migration wrapper's task inputs and schema-v2 initialization calls.
