@@ -1,14 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${ASA_OPERATION_MODE:-server}" != "server" ]]; then
+  exec /asa/scripts/migrate-storage.sh "${ASA_OPERATION_MODE}"
+fi
+
 required=(
   AWS_REGION
   S3_BUCKET
   S3_SAVE_KEY
   S3_BACKUP_PREFIX
+  S3_RUNTIME_PREFIX
+  S3_COMMON_CONFIG_PREFIX
+  S3_MAP_CONFIG_PREFIX
+  BACKUP_REQUEST_KEY
+  HEARTBEAT_KEY
+  READY_KEY
   ASA_APP_ID
   ASA_INSTALL_DIR
+  ASA_MAP_ID
   ASA_MAP
+  ASA_RUN_ID
   ASA_SESSION_NAME
   ASA_MAX_PLAYERS
   ASA_SERVER_PASSWORD
@@ -44,6 +56,7 @@ asa_pid=""
 backup_loop_pid=""
 request_loop_pid=""
 heartbeat_loop_pid=""
+cluster_watchdog_pid=""
 stopping="false"
 
 notify() {
@@ -60,6 +73,7 @@ stop_background_loops() {
   if [[ -n "${backup_loop_pid}" ]]; then kill "${backup_loop_pid}" 2>/dev/null || true; fi
   if [[ -n "${request_loop_pid}" ]]; then kill "${request_loop_pid}" 2>/dev/null || true; fi
   if [[ -n "${heartbeat_loop_pid}" ]]; then kill "${heartbeat_loop_pid}" 2>/dev/null || true; fi
+  if [[ -n "${cluster_watchdog_pid}" ]]; then kill "${cluster_watchdog_pid}" 2>/dev/null || true; fi
 }
 
 shutdown() {
@@ -93,6 +107,12 @@ else
   echo "Using ASA dedicated server bundled in the container image."
 fi
 
+cluster_dir="${ASA_CLUSTER_DIR:-/asa/cluster}"
+if ! timeout "${CLUSTER_PROBE_TIMEOUT_SECONDS:-5}" /asa/scripts/cluster-probe.sh; then
+  echo "Shared cluster storage is not a writable mount point: ${cluster_dir}" >&2
+  exit 1
+fi
+
 /asa/scripts/restore.sh
 /asa/scripts/configure-server.py
 
@@ -105,12 +125,10 @@ fi
 # Steam currently ships this DLL with ASA, but it crashes when loaded through Proton.
 rm -f "${ASA_INSTALL_DIR}/ShooterGame/Binaries/Win64/steamclient64.dll"
 
-cluster_dir="${ASA_INSTALL_DIR}/ShooterGame/Saved/clusters"
 cluster_dir_windows="Z:${cluster_dir//\//\\}"
-mkdir -p "${cluster_dir}"
 
 launch_arg="${ASA_MAP}?listen?Port=${ASA_PORT}"
-extra_args=(-log "-WinLiveMaxPlayers=${ASA_MAX_PLAYERS}" "-clusterid=${ASA_CLUSTER_ID}" "-ClusterDirOverride=${cluster_dir_windows}")
+extra_args=(-log "-WinLiveMaxPlayers=${ASA_MAX_PLAYERS}" "-clusterid=${ASA_CLUSTER_ID}" "-ClusterDirOverride=${cluster_dir_windows}" -NoTransferFromFiltering)
 if [[ -n "${ASA_EVENT_MOD_ID:-}" ]]; then
   extra_args+=("-mods=${ASA_EVENT_MOD_ID}")
 fi
@@ -149,12 +167,13 @@ asa_pid="$!"
 backup_loop_pid="$!"
 
 (
-  key="${BACKUP_REQUEST_KEY:-runtime/backup-request.json}"
+  key="${BACKUP_REQUEST_KEY}"
   last_seen=""
   while true; do
     request="$(aws s3 cp "s3://${S3_BUCKET}/${key}" - 2>/dev/null || true)"
     requested_at="$(jq -r '.requestedAt // empty' <<<"${request}" 2>/dev/null || true)"
-    if [[ -n "${requested_at}" && "${requested_at}" != "${last_seen}" ]]; then
+    requested_run_id="$(jq -r '.runId // empty' <<<"${request}" 2>/dev/null || true)"
+    if [[ "${requested_run_id}" == "${ASA_RUN_ID}" && -n "${requested_at}" && "${requested_at}" != "${last_seen}" ]]; then
       last_seen="${requested_at}"
       run_backup
     fi
@@ -164,22 +183,44 @@ backup_loop_pid="$!"
 request_loop_pid="$!"
 
 (
-  key="${HEARTBEAT_KEY:-runtime/heartbeat.json}"
+  key="${HEARTBEAT_KEY}"
   while true; do
     sleep 60
     players="$(/asa/scripts/rcon.py ListPlayers 2>/dev/null)" || continue
     count="$(grep -c '^[0-9]\+\.' <<<"${players}" || true)"
-    printf '{"playerCount": %d, "updatedAt": "%s"}\n' \
-      "${count}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    printf '{"playerCount": %d, "updatedAt": "%s", "runId": "%s", "mapId": "%s"}\n' \
+      "${count}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${ASA_RUN_ID}" "${ASA_MAP_ID}" \
       | aws s3 cp - "s3://${S3_BUCKET}/${key}" --content-type application/json || true
   done
 ) &
 heartbeat_loop_pid="$!"
 
 (
+  failures=0
+  while true; do
+    sleep "${CLUSTER_WATCHDOG_INTERVAL_SECONDS:-30}"
+    if timeout "${CLUSTER_PROBE_TIMEOUT_SECONDS:-5}" /asa/scripts/cluster-probe.sh; then
+      failures=0
+      continue
+    fi
+    failures=$(( failures + 1 ))
+    if (( failures < ${CLUSTER_WATCHDOG_FAILURES:-3} )); then continue; fi
+    notify "Shared Cross-ARK storage failed ${failures} consecutive probes. Map ${ASA_MAP_ID} is shutting down without local fallback."
+    timeout 10 /asa/scripts/rcon.py SaveWorld || true
+    kill -TERM "${asa_pid}" 2>/dev/null || true
+    exit 0
+  done
+) &
+cluster_watchdog_pid="$!"
+
+(
   for _ in $(seq 1 120); do
     if nc -z -w1 127.0.0.1 "${ASA_RCON_PORT}" >/dev/null 2>&1; then
-      notify "ASA server is READY.\nServer: ${ASA_SESSION_NAME}\nMap: ${ASA_MAP}\nEvent mod: ${ASA_EVENT_MOD_ID:-not configured}\nAuto-stop: no players for ${IDLE_TIMEOUT_MINUTES:-30}m / monthly limit ${MONTHLY_RUNTIME_HOURS_LIMIT:-80}h"
+      ready_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      jq -n --arg runId "${ASA_RUN_ID}" --arg mapId "${ASA_MAP_ID}" --arg readyAt "${ready_at}" \
+        '{runId: $runId, mapId: $mapId, readyAt: $readyAt}' \
+        | aws s3 cp - "s3://${S3_BUCKET}/${READY_KEY}" --content-type application/json || true
+      notify "ASA server is READY.\nServer: ${ASA_SESSION_NAME}\nMap: ${ASA_MAP_ID} (${ASA_MAP})\nEvent mod: ${ASA_EVENT_MOD_ID:-not configured}\nAuto-stop: no players for ${IDLE_TIMEOUT_MINUTES:-30}m / monthly limit ${MONTHLY_RUNTIME_HOURS_LIMIT:-80}h"
       exit 0
     fi
     sleep 10
@@ -190,4 +231,5 @@ heartbeat_loop_pid="$!"
 exit_code=0
 wait "${asa_pid}" || exit_code="$?"
 stop_background_loops
+if [[ "${stopping}" != "true" ]]; then run_backup true; fi
 exit "${exit_code}"

@@ -1,10 +1,11 @@
 import { activeRuntimeSecondsThisMonth } from "./budget.js";
 import { validHeartbeat } from "./heartbeat.js";
-import type { BudgetState, ServerState } from "./types.js";
+import type { BudgetState, MapServerState } from "./types.js";
 
 export type IdleCheckRule =
   | "NOT_RUNNING"
   | "BUDGET_EXCEEDED"
+  | "SESSION_EXPIRED"
   | "STARTING"
   | "HEARTBEAT_INVALID"
   | "SAMPLE_REUSED"
@@ -20,7 +21,7 @@ export interface IdleStateUpdate {
 export interface IdleCheckDecision {
   action: "STOP" | "DELETE_SCHEDULE" | "NONE";
   rule: IdleCheckRule;
-  reason?: "IDLE_TIMEOUT" | "BUDGET_EXCEEDED";
+  reason?: "IDLE_TIMEOUT" | "BUDGET_EXCEEDED" | "SESSION_EXPIRED";
   stateUpdate?: IdleStateUpdate;
   heartbeatAgeSeconds?: number;
   playerCount?: number;
@@ -28,13 +29,13 @@ export interface IdleCheckDecision {
   currentMonthRuntimeSeconds: number;
 }
 
-function changedIdleState(state: ServerState, idleSince: string | null, lastHeartbeatAt: string | null): IdleStateUpdate | undefined {
+function changedIdleState(state: MapServerState, idleSince: string | null, lastHeartbeatAt: string | null): IdleStateUpdate | undefined {
   if ((state.idleSince ?? null) === idleSince && (state.lastHeartbeatAt ?? null) === lastHeartbeatAt) return undefined;
   return { idleSince, lastHeartbeatAt };
 }
 
 export function evaluateIdleCheck(params: {
-  state: ServerState | undefined;
+  state: MapServerState | undefined;
   heartbeat: unknown;
   budget: BudgetState | undefined;
   now: Date;
@@ -42,8 +43,17 @@ export function evaluateIdleCheck(params: {
   heartbeatFreshnessSeconds: number;
 }): IdleCheckDecision {
   const { state, now } = params;
-  if (!state?.taskArn || (state.status !== "RUNNING" && state.status !== "STARTING")) {
+  if (!state?.taskArn || !state.runId || (state.status !== "RUNNING" && state.status !== "STARTING")) {
     return { action: "DELETE_SCHEDULE", rule: "NOT_RUNNING", currentMonthRuntimeSeconds: params.budget?.runtimeSeconds ?? 0 };
+  }
+
+  if (state.expiresAt && Date.parse(state.expiresAt) <= now.getTime()) {
+    return {
+      action: "STOP",
+      rule: "SESSION_EXPIRED",
+      reason: "SESSION_EXPIRED",
+      currentMonthRuntimeSeconds: params.budget?.runtimeSeconds ?? 0,
+    };
   }
 
   const activeRuntime = activeRuntimeSecondsThisMonth(state.taskStartedAt ?? state.startedAt, now);
@@ -65,6 +75,8 @@ export function evaluateIdleCheck(params: {
     now,
     startedAt: state.startedAt,
     freshnessSeconds: params.heartbeatFreshnessSeconds,
+    runId: state.runId,
+    mapId: state.mapId,
   });
   if (!heartbeat) {
     return {

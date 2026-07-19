@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import { ECSClient, RunTaskCommand, StopTaskCommand } from "@aws-sdk/client-ecs";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CreateScheduleCommand, DeleteScheduleCommand, SchedulerClient } from "@aws-sdk/client-scheduler";
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from "aws-lambda";
-import { canStart, currentMonthRuntimeSeconds, hours, monthKey } from "../../shared/budget.js";
+import { canReserve, committedRuntimeSeconds, hours, monthKey, splitReservationByJstMonth } from "../../shared/budget.js";
 import {
   getJsonArrayParameter,
   getParameter,
@@ -16,10 +17,14 @@ import {
 import {
   DEFAULT_IDLE_MINUTES,
   DEFAULT_MAX_PLAYERS,
+  DEFAULT_SESSION_HOURS,
   HEARTBEAT_FRESHNESS_SECONDS,
   MAX_IDLE_MINUTES,
   MAX_PLAYERS,
+  MAX_SESSION_HOURS,
   MIN_IDLE_MINUTES,
+  MIN_SESSION_HOURS,
+  STATE_SCHEMA_VERSION,
 } from "../../shared/defaults.js";
 import {
   type DiscordInteraction,
@@ -37,10 +42,18 @@ import {
   verifyDiscordSignature,
 } from "../../shared/discord.js";
 import { eventModLabel, parseEventModId } from "../../shared/events.js";
-import { parseHeartbeatJson } from "../../shared/heartbeat.js";
-import { isSupportedAsaMap, parseEnabledMaps } from "../../shared/maps.js";
+import { parseHeartbeatJson, parseReadyJson } from "../../shared/heartbeat.js";
+import {
+  enabledMapDefinitions,
+  isSupportedAsaMap,
+  mapByArkMapName,
+  parseEnabledMaps,
+  sessionNameFor,
+  type AsaMapDefinition,
+} from "../../shared/maps.js";
+import { mapStorageKeys, stopScheduleName, taskGroup } from "../../shared/resources.js";
 import { StateStore } from "../../shared/state.js";
-import type { ServerState } from "../../shared/types.js";
+import type { MapServerState, StartOperation } from "../../shared/types.js";
 
 const ecs = new ECSClient({});
 const lambda = new LambdaClient({});
@@ -52,19 +65,19 @@ const clusterArn = requireEnv("CLUSTER_ARN");
 const taskDefinitionArn = requireEnv("TASK_DEFINITION_ARN");
 const subnetIds = requireEnv("SUBNET_IDS").split(",").filter(Boolean);
 const securityGroupId = requireEnv("SECURITY_GROUP_ID");
-const stopScheduleName = requireEnv("STOP_SCHEDULE_NAME");
 const stopSchedulerRoleArn = requireEnv("STOP_SCHEDULER_ROLE_ARN");
 const bucketName = requireEnv("S3_BUCKET");
-const s3RuntimePrefix = process.env.S3_RUNTIME_PREFIX ?? "runtime/";
+const resourcePrefix = process.env.RESOURCE_PREFIX ?? "";
+const environmentName = process.env.ENVIRONMENT_NAME ?? "default";
 const parameterNames = parameterNamesFor(process.env.CONFIG_PREFIX);
 const secretNames = secretNamesFor(process.env.CONFIG_PREFIX);
 const defaultIdleMinutes = intEnv("DEFAULT_IDLE_MINUTES", DEFAULT_IDLE_MINUTES);
 const monthlyRuntimeHoursLimit = intEnv("MONTHLY_RUNTIME_HOURS_LIMIT", 80);
+const maxConcurrentMaps = intEnv("MAX_CONCURRENT_MAPS", 2);
 const spotHourlyCostJpy = Number(process.env.SPOT_HOURLY_COST_JPY ?? "17");
 const enableOnDemandFallback = process.env.ENABLE_ON_DEMAND_FALLBACK === "true";
 const allowDiscordPasswordNotification = process.env.ALLOW_DISCORD_PASSWORD_NOTIFICATION === "true";
 const functionName = requireEnv("AWS_LAMBDA_FUNCTION_NAME");
-const startingStaleMs = 10 * 60 * 1000;
 const heartbeatFreshnessSeconds = intEnv("HEARTBEAT_FRESHNESS_SECONDS", HEARTBEAT_FRESHNESS_SECONDS);
 
 interface AsyncCommandEvent {
@@ -76,20 +89,10 @@ function isAsyncCommandEvent(event: APIGatewayProxyEventV2 | AsyncCommandEvent):
   return "source" in event && event.source === "asa.discord.command";
 }
 
-function isStaleStarting(state: ServerState | undefined, now: Date): boolean {
-  if (state?.status !== "STARTING" || state.taskArn) return false;
-  const updatedAt = Date.parse(state.updatedAt);
-  return Number.isFinite(updatedAt) && now.getTime() - updatedAt >= startingStaleMs;
-}
-
 const store = new StateStore(tableName);
 
 function response(statusCode: number, body: unknown): APIGatewayProxyStructuredResultV2 {
-  return {
-    statusCode,
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  };
+  return { statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
 }
 
 function spotCostJpy(runtimeSeconds: number): number {
@@ -101,72 +104,104 @@ function rawBody(event: APIGatewayProxyEventV2): string {
   return event.isBase64Encoded ? Buffer.from(event.body, "base64").toString("utf8") : event.body;
 }
 
-function startOptions(interaction: DiscordInteraction) {
-  const idleTimeoutMinutes = Number(optionValue<number>(interaction, "idle_minutes") ?? defaultIdleMinutes);
-  const map = optionValue<string>(interaction, "map") ?? "TheIsland_WP";
-  const maxPlayers = Math.min(Math.max(Number(optionValue<number>(interaction, "max_players") ?? DEFAULT_MAX_PLAYERS), 1), MAX_PLAYERS);
-  const publicNotify = optionValue<boolean>(interaction, "public_notify") ?? true;
-  return { idleTimeoutMinutes, map, maxPlayers, publicNotify };
+function runIdFor(interaction: DiscordInteraction): string {
+  return createHash("sha256").update(`discord:${interaction.id}`).digest("base64url").slice(0, 32);
 }
 
-async function createStopSchedule(): Promise<void> {
-  await scheduler
-    .send(
-      new DeleteScheduleCommand({
-        Name: stopScheduleName,
-        GroupName: "default",
-      }),
-    )
-    .catch(() => undefined);
+function active(state: MapServerState): boolean {
+  return state.status === "STARTING" || state.status === "RUNNING" || state.status === "STOPPING";
+}
+
+async function enabledDefinitions(): Promise<AsaMapDefinition[]> {
+  const enabled = parseEnabledMaps(await getParameter(parameterNames.enabledMaps, ""));
+  const unsupported = enabled.filter((value) => !isSupportedAsaMap(value));
+  if (unsupported.length > 0) {
+    throw new Error(`The enabled-maps parameter contains unsupported map values: ${unsupported.join(", ")}.`);
+  }
+  return enabledMapDefinitions(enabled);
+}
+
+async function selectedDefinition(interaction: DiscordInteraction, useDefault: boolean): Promise<AsaMapDefinition | undefined> {
+  let arkMapName = optionValue<string>(interaction, "map");
+  if (!arkMapName && useDefault) arkMapName = await getParameter(parameterNames.defaultMap, "TheIsland_WP");
+  if (!arkMapName) return undefined;
+  const definition = mapByArkMapName(arkMapName);
+  if (!definition) throw new Error(`Unsupported map: ${arkMapName}. Re-register the Discord commands.`);
+  const enabled = await enabledDefinitions();
+  if (!enabled.some((value) => value.mapId === definition.mapId)) {
+    throw new Error(`Map ${arkMapName} is not enabled. Enabled maps: ${enabled.map((value) => value.arkMapName).join(", ")}.`);
+  }
+  return definition;
+}
+
+async function targetState(interaction: DiscordInteraction): Promise<{ definition: AsaMapDefinition; state: MapServerState } | string> {
+  const selected = await selectedDefinition(interaction, false);
+  const definitions = await enabledDefinitions();
+  if (selected) {
+    const state = await store.getMap(selected.mapId);
+    return state && active(state) ? { definition: selected, state } : `${selected.name} is not running.`;
+  }
+  const states = await store.getMaps(definitions.map((value) => value.mapId));
+  const running = states.filter(active);
+  if (running.length === 0) return "No ASA map is running.";
+  if (running.length > 1) return `Multiple maps are active (${running.map((value) => value.mapId).join(", ")}); specify map.`;
+  const definition = definitions.find((value) => value.mapId === running[0].mapId);
+  if (!definition) return "The active map is not in the enabled map registry.";
+  return { definition, state: running[0] };
+}
+
+async function createStopSchedule(state: MapServerState): Promise<void> {
+  const name = stopScheduleName(environmentName, state.mapId);
+  await scheduler.send(new DeleteScheduleCommand({ Name: name, GroupName: "default" })).catch(() => undefined);
   await scheduler.send(
     new CreateScheduleCommand({
-      Name: stopScheduleName,
+      Name: name,
       GroupName: "default",
       FlexibleTimeWindow: { Mode: "OFF" },
       ScheduleExpression: "rate(1 minute)",
       Target: {
         Arn: requireEnv("STOP_SERVER_FUNCTION_ARN"),
         RoleArn: stopSchedulerRoleArn,
-        Input: JSON.stringify({ source: "IDLE_CHECK" }),
+        Input: JSON.stringify({
+          source: "IDLE_CHECK",
+          mapId: state.mapId,
+          runId: state.runId,
+          expectedTaskArn: state.taskArn,
+        }),
       },
     }),
   );
 }
 
-async function deleteStopSchedule(): Promise<void> {
-  await scheduler.send(new DeleteScheduleCommand({ Name: stopScheduleName, GroupName: "default" })).catch(() => undefined);
-}
-
 async function handleStart(interaction: DiscordInteraction) {
   const now = new Date();
-  const options = startOptions(interaction);
-  if (
-    !Number.isInteger(options.idleTimeoutMinutes) ||
-    options.idleTimeoutMinutes < MIN_IDLE_MINUTES ||
-    options.idleTimeoutMinutes > MAX_IDLE_MINUTES
-  ) {
+  const idleTimeoutMinutes = Number(optionValue<number>(interaction, "idle_minutes") ?? defaultIdleMinutes);
+  const sessionHours = Number(optionValue<number>(interaction, "session_hours") ?? DEFAULT_SESSION_HOURS);
+  let maxPlayers = Math.min(Math.max(Number(optionValue<number>(interaction, "max_players") ?? DEFAULT_MAX_PLAYERS), 1), MAX_PLAYERS);
+  const publicNotify = optionValue<boolean>(interaction, "public_notify") ?? true;
+  if (!Number.isInteger(idleTimeoutMinutes) || idleTimeoutMinutes < MIN_IDLE_MINUTES || idleTimeoutMinutes > MAX_IDLE_MINUTES) {
     return message(`idle_minutes must be an integer from ${MIN_IDLE_MINUTES} to ${MAX_IDLE_MINUTES}.`, true);
   }
-  const defaultMap = await getParameter(parameterNames.defaultMap, "TheIsland_WP");
-  if (!optionValue<string>(interaction, "map")) options.map = defaultMap;
-  const enabledMaps = parseEnabledMaps(await getParameter(parameterNames.enabledMaps, ""));
-  const unsupportedEnabledMaps = enabledMaps.filter((map) => !isSupportedAsaMap(map));
-  if (unsupportedEnabledMaps.length > 0) {
-    return message(
-      `The enabled-maps parameter contains unsupported map values: ${unsupportedEnabledMaps.join(", ")}. Update the parameter and re-register the Discord commands.`,
-      true,
-    );
+  if (!Number.isInteger(sessionHours) || sessionHours < MIN_SESSION_HOURS || sessionHours > MAX_SESSION_HOURS) {
+    return message(`session_hours must be an integer from ${MIN_SESSION_HOURS} to ${MAX_SESSION_HOURS}.`, true);
   }
-  if (!isSupportedAsaMap(options.map)) {
-    return message(`Unsupported map: ${options.map}. Re-register the Discord commands after adding a supported map.`, true);
+
+  let definition: AsaMapDefinition;
+  try {
+    const selected = await selectedDefinition(interaction, true);
+    if (!selected) throw new Error("A default map is required.");
+    definition = selected;
+  } catch (error) {
+    return message(error instanceof Error ? error.message : String(error), true);
   }
-  if (enabledMaps.length > 0 && !enabledMaps.includes(options.map)) {
-    return message(
-      `Map ${options.map} is not enabled for this server. Enabled maps: ${enabledMaps.join(", ")}. If this is the default map, update the default-map parameter, then re-register the Discord commands.`,
-      true,
-    );
+
+  const baseSessionName = await getParameter(parameterNames.sessionName, "private-asa");
+  let sessionName: string;
+  try {
+    sessionName = sessionNameFor(baseSessionName, definition);
+  } catch (error) {
+    return message(error instanceof Error ? error.message : String(error), true);
   }
-  const sessionName = await getParameter(parameterNames.sessionName, "private-asa");
   let eventModId: string | null;
   try {
     eventModId = parseEventModId(await getParameter(parameterNames.eventModId, "", { cache: false }));
@@ -175,48 +210,68 @@ async function handleStart(interaction: DiscordInteraction) {
   }
   const configuredMaxPlayers = Number(await getParameter(parameterNames.maxPlayers, "4"));
   if (!optionValue<number>(interaction, "max_players") && Number.isFinite(configuredMaxPlayers)) {
-    options.maxPlayers = Math.min(Math.max(configuredMaxPlayers, 1), MAX_PLAYERS);
+    maxPlayers = Math.min(Math.max(configuredMaxPlayers, 1), MAX_PLAYERS);
   }
-  if (!/^[A-Za-z0-9_.-]{1,64}$/.test(sessionName)) {
-    return message("Configured session name is invalid. Use only A-Z, a-z, 0-9, underscore, dot, and hyphen.", true);
-  }
-  const existing = await store.getServer();
-  if (
-    (existing?.status === "STARTING" || existing?.status === "RUNNING" || existing?.status === "STOPPING") &&
-    !isStaleStarting(existing, now)
-  ) {
-    return message(`ASA server is already ${existing.status}.\nConnect: ${existing.connectCommand ?? "not available yet"}`, true);
-  }
-  const budgetPk = monthKey(now);
-  const budget = await store.getBudget(budgetPk);
-  const budgetDecision = canStart({ budget, monthlyRuntimeHoursLimit });
+
+  const reservations = splitReservationByJstMonth(now, sessionHours * 3600);
+  const budgets = await store.getBudgets(reservations.map((value) => value.budgetPk));
+  const budgetDecision = canReserve({ reservations, budgets, monthlyRuntimeHoursLimit });
   if (!budgetDecision.ok) return message(budgetDecision.reason, true);
 
+  const runId = runIdFor(interaction);
   const userId = userIdFromInteraction(interaction) ?? null;
-  const state: ServerState = {
-    pk: "SERVER",
+  const expiresAt = new Date(now.getTime() + sessionHours * 3600_000).toISOString();
+  const state: MapServerState = {
+    pk: `MAP#${definition.mapId}`,
+    mapId: definition.mapId,
+    arkMapName: definition.arkMapName,
     status: "STARTING",
+    runId,
     taskArn: null,
     clusterArn,
     startedAt: now.toISOString(),
     taskStartedAt: null,
+    expiresAt,
     publicIp: null,
     connectCommand: null,
     sessionName,
-    mapName: options.map,
     eventModId,
-    maxPlayers: options.maxPlayers,
-    idleTimeoutMinutes: options.idleTimeoutMinutes,
+    maxPlayers,
+    idleTimeoutMinutes,
     idleSince: null,
     lastHeartbeatAt: null,
     startedByDiscordUserId: userId,
     startedFromChannelId: interaction.channel_id ?? null,
+    readyAt: null,
     lastBackupAt: null,
     lastStopReason: null,
+    lastEcsEventVersion: null,
+    reservations,
     updatedAt: now.toISOString(),
   };
-  await store.putServerStarting(state, new Date(now.getTime() - startingStaleMs).toISOString());
+  const operation: StartOperation = {
+    pk: `OPERATION#${runId}`,
+    runId,
+    mapId: definition.mapId,
+    phase: "CLAIMED",
+    taskArn: null,
+    reservations,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+    ttl: Math.floor(now.getTime() / 1000) + 7 * 24 * 3600,
+  };
+  const reserved = await store.reserveMapStart({
+    state,
+    operation,
+    maxConcurrentMaps,
+    monthlyRuntimeSecondsLimit: monthlyRuntimeHoursLimit * 3600,
+    schemaVersion: STATE_SCHEMA_VERSION,
+  });
+  if (!reserved) {
+    return message(`Cannot start ${definition.name}: it is already active, concurrency is full, or the budget reservation raced.`, true);
+  }
 
+  const keys = mapStorageKeys(resourcePrefix, definition.mapId);
   let taskArn: string;
   try {
     const runTask = await ecs.send(
@@ -224,6 +279,15 @@ async function handleStart(interaction: DiscordInteraction) {
         cluster: clusterArn,
         taskDefinition: taskDefinitionArn,
         platformVersion: "LATEST",
+        clientToken: runId,
+        startedBy: runId,
+        group: taskGroup(definition.mapId, runId),
+        enableECSManagedTags: true,
+        propagateTags: "TASK_DEFINITION",
+        tags: [
+          { key: "asa:map-id", value: definition.mapId },
+          { key: "asa:run-id", value: runId },
+        ],
         capacityProviderStrategy: enableOnDemandFallback
           ? [
               { capacityProvider: "FARGATE_SPOT", weight: 1, base: 0 },
@@ -231,23 +295,29 @@ async function handleStart(interaction: DiscordInteraction) {
             ]
           : [{ capacityProvider: "FARGATE_SPOT", weight: 1, base: 0 }],
         networkConfiguration: {
-          awsvpcConfiguration: {
-            assignPublicIp: "ENABLED",
-            subnets: subnetIds,
-            securityGroups: [securityGroupId],
-          },
+          awsvpcConfiguration: { assignPublicIp: "ENABLED", subnets: subnetIds, securityGroups: [securityGroupId] },
         },
         overrides: {
           containerOverrides: [
             {
               name: "AsaServerContainer",
               environment: [
-                { name: "ASA_MAP", value: options.map },
+                { name: "ASA_MAP_ID", value: definition.mapId },
+                { name: "ASA_MAP", value: definition.arkMapName },
                 { name: "ASA_SESSION_NAME", value: sessionName },
-                { name: "ASA_MAX_PLAYERS", value: String(options.maxPlayers) },
+                { name: "ASA_RUN_ID", value: runId },
+                { name: "ASA_MAX_PLAYERS", value: String(maxPlayers) },
                 ...(eventModId ? [{ name: "ASA_EVENT_MOD_ID", value: eventModId }] : []),
-                { name: "IDLE_TIMEOUT_MINUTES", value: String(options.idleTimeoutMinutes) },
+                { name: "IDLE_TIMEOUT_MINUTES", value: String(idleTimeoutMinutes) },
                 { name: "MONTHLY_RUNTIME_HOURS_LIMIT", value: String(monthlyRuntimeHoursLimit) },
+                { name: "S3_SAVE_KEY", value: keys.saveKey },
+                { name: "S3_BACKUP_PREFIX", value: keys.backupPrefix },
+                { name: "S3_RUNTIME_PREFIX", value: keys.runtimePrefix },
+                { name: "S3_COMMON_CONFIG_PREFIX", value: keys.commonConfigPrefix },
+                { name: "S3_MAP_CONFIG_PREFIX", value: keys.mapConfigPrefix },
+                { name: "BACKUP_REQUEST_KEY", value: keys.backupRequestKey },
+                { name: "HEARTBEAT_KEY", value: keys.heartbeatKey },
+                { name: "READY_KEY", value: keys.readyKey },
               ],
             },
           ],
@@ -260,184 +330,218 @@ async function handleStart(interaction: DiscordInteraction) {
     if (!startedTaskArn) throw new Error("RunTask returned no taskArn.");
     taskArn = startedTaskArn;
   } catch (error) {
-    await store.updateServerStatus("ERROR", { lastStopReason: error instanceof Error ? error.message : String(error) });
+    await store.rollbackMapStart(definition.mapId, runId, reservations, error instanceof Error ? error.message : String(error));
     throw error;
   }
 
+  state.taskArn = taskArn;
   try {
-    await store.updateServerStatus("STARTING", { taskArn });
-    await createStopSchedule();
+    if (!(await store.attachStartedTask(definition.mapId, runId, taskArn)))
+      throw new Error("Start claim no longer matches the current map state.");
+    await createStopSchedule(state);
+    if (!(await store.markOperationScheduled(runId, definition.mapId, taskArn))) throw new Error("Could not finalize start operation.");
   } catch (error) {
-    await ecs
-      .send(new StopTaskCommand({ cluster: clusterArn, task: taskArn, reason: "START_ROLLBACK after initialization failure" }))
-      .catch((stopError) => console.error("Failed to roll back started task", stopError));
-    await store
-      .updateServerStatus("STOPPING", { lastStopReason: error instanceof Error ? error.message : String(error) })
-      .catch((stateError) => console.error("Failed to record start rollback", stateError));
-    throw new Error(`ASA task was stopped because start initialization failed: ${error instanceof Error ? error.message : String(error)}`);
+    const reason = error instanceof Error ? error.message : String(error);
+    const stopRequested = await ecs
+      .send(new StopTaskCommand({ cluster: clusterArn, task: taskArn, reason: "START_ROLLBACK" }))
+      .then(() => true)
+      .catch((stopError) => {
+        console.error(`Could not stop task ${taskArn} after start finalization failed; the reconciler will recover it.`, stopError);
+        return false;
+      });
+    if (stopRequested) await store.markMapStopping(definition.mapId, runId, taskArn, `START_FINALIZATION_FAILED: ${reason}`);
+    throw error;
   }
 
-  await store.incrementStartCount(budgetPk).catch((error) => console.error("Failed to increment start count", error));
-  if (options.publicNotify) {
+  if (publicNotify) {
     try {
-      const webhook = await getSecret(secretNames.notificationWebhookUrl);
       await postWebhook(
-        webhook,
-        `ASA server start requested by <@${userId ?? "unknown"}>.\nMap: ${options.map}\nEvent: ${eventModLabel(eventModId)}\nAuto-stop: no players for ${options.idleTimeoutMinutes}m / monthly limit ${monthlyRuntimeHoursLimit}h\nStatus: STARTING`,
+        await getSecret(secretNames.notificationWebhookUrl),
+        `ASA map start requested by <@${userId ?? "unknown"}>.\nMap: ${definition.name}\nSession: ${sessionName}\nEvent: ${eventModLabel(eventModId)}\nReserved: ${sessionHours}h\nStatus: STARTING`,
       );
     } catch (error) {
       console.error("Failed to post start notification", error);
     }
   }
   return message(
-    `ASA start requested.\nMap: ${options.map}\nEvent: ${eventModLabel(eventModId)}\nAuto-stop: no players for ${options.idleTimeoutMinutes}m / monthly limit ${monthlyRuntimeHoursLimit}h`,
+    `ASA start requested.\nMap: ${definition.name}\nSession: ${sessionName}\nEvent: ${eventModLabel(eventModId)}\nReserved: ${sessionHours}h`,
     true,
   );
 }
 
 async function handleStop(interaction: DiscordInteraction) {
-  const state = await store.getServer();
-  if (isStaleStarting(state, new Date())) {
-    await store.updateServerStatus("STOPPED", { lastStopReason: "STALE_START_RESET" });
-    return message("Stale STARTING state was reset. No ECS task was running.", true);
-  }
-  if (!state?.taskArn || (state.status !== "RUNNING" && state.status !== "STARTING")) {
-    return message("ASA server is not running.", true);
-  }
-  await ecs.send(
-    new StopTaskCommand({
-      cluster: clusterArn,
-      task: state.taskArn,
-      reason: `USER_REQUEST by ${userIdFromInteraction(interaction) ?? "unknown"}`,
+  const target = await targetState(interaction);
+  if (typeof target === "string") return message(target, true);
+  await lambda.send(
+    new InvokeCommand({
+      FunctionName: requireEnv("STOP_SERVER_FUNCTION_ARN"),
+      InvocationType: "RequestResponse",
+      Payload: Buffer.from(
+        JSON.stringify({
+          source: "MANUAL",
+          mapId: target.definition.mapId,
+          runId: target.state.runId,
+          expectedTaskArn: target.state.taskArn,
+          reason: "USER_REQUEST",
+          requestedByDiscordUserId: userIdFromInteraction(interaction) ?? null,
+        }),
+      ),
     }),
   );
-  await store.updateServerStatus("STOPPING", { lastStopReason: "USER_REQUEST" });
-  await deleteStopSchedule();
-  const webhook = await getSecret(secretNames.notificationWebhookUrl);
-  await postWebhook(webhook, "ASA server is stopping.\nReason: USER_REQUEST\nSaving world and uploading backup to S3...");
-  return message("ASA stop requested.", true);
+  return message(`ASA stop requested for ${target.definition.name}.`, true);
 }
 
-async function handleStatus() {
-  const now = new Date();
-  const state = await store.getServer();
-  const budget = await store.getBudget(monthKey(now));
-  const runtimeSeconds = currentMonthRuntimeSeconds({
-    budget,
-    taskStartedAt: state?.status === "RUNNING" || state?.status === "STARTING" ? (state.taskStartedAt ?? state.startedAt) : undefined,
-    now,
-  });
-  if (!state) return message("Status: STOPPED\nThis month: 0h", true);
-  let playerCount: number | undefined;
-  if (state.status === "RUNNING") {
-    try {
-      const object = await s3.send(new GetObjectCommand({ Bucket: bucketName, Key: `${s3RuntimePrefix}heartbeat.json` }));
-      const heartbeat = parseHeartbeatJson(await object.Body?.transformToString(), {
-        now,
-        startedAt: state.startedAt,
-        freshnessSeconds: heartbeatFreshnessSeconds,
-      });
-      playerCount = heartbeat?.playerCount;
-    } catch {
-      // Missing, stale, or malformed heartbeats fall back to unknown.
-    }
+async function readPlayerCount(state: MapServerState): Promise<number | undefined> {
+  if (state.status !== "RUNNING" || !state.runId) return undefined;
+  try {
+    const key = mapStorageKeys(resourcePrefix, state.mapId).heartbeatKey;
+    const object = await s3.send(new GetObjectCommand({ Bucket: bucketName, Key: key }));
+    return parseHeartbeatJson(await object.Body?.transformToString(), {
+      now: new Date(),
+      startedAt: state.startedAt,
+      freshnessSeconds: heartbeatFreshnessSeconds,
+      runId: state.runId,
+      mapId: state.mapId,
+    })?.playerCount;
+  } catch {
+    return undefined;
   }
-  return message(
-    [
-      `Status: ${state.status}`,
-      `Map: ${state.mapName}`,
-      `Event: ${eventModLabel(state.eventModId)}`,
-      `Players: ${playerCount ?? "unknown"} / ${state.maxPlayers}`,
-      `Started: ${state.startedAt ?? "N/A"}`,
-      `Auto-stop: no players for ${state.idleTimeoutMinutes}m / monthly limit ${monthlyRuntimeHoursLimit}h`,
-      `Connect: ${state.connectCommand ?? "not available"}`,
-      `This month: ${hours(runtimeSeconds)}h / ${monthlyRuntimeHoursLimit}h`,
-      `Estimated cost (conservative): ¥${Math.round(budget?.estimatedCostJpy ?? 0)}`,
-      `Estimated cost (Fargate Spot approx.): ¥${Math.round(spotCostJpy(runtimeSeconds))}`,
-    ].join("\n"),
-    true,
-  );
 }
 
-async function handleInfo() {
-  const state = await store.getServer();
-  if (!state || state.status === "STOPPED") return message("ASA server is stopped.", true);
+async function readReadyAt(state: MapServerState): Promise<string | undefined> {
+  if ((state.status !== "RUNNING" && state.status !== "STARTING") || !state.runId) return undefined;
+  try {
+    const key = mapStorageKeys(resourcePrefix, state.mapId).readyKey;
+    const object = await s3.send(new GetObjectCommand({ Bucket: bucketName, Key: key }));
+    return parseReadyJson(await object.Body?.transformToString(), {
+      now: new Date(),
+      startedAt: state.startedAt,
+      runId: state.runId,
+      mapId: state.mapId,
+    })?.readyAt;
+  } catch {
+    return undefined;
+  }
+}
+
+function stateLine(state: MapServerState, playerCount?: number, readyAt?: string): string {
+  return `${state.mapId}: ${state.status} | ready ${readyAt ? "yes" : "no"} | players ${playerCount ?? "?"}/${state.maxPlayers} | ${state.connectCommand ?? "no address"}`;
+}
+
+async function handleStatus(interaction: DiscordInteraction) {
+  const selected = await selectedDefinition(interaction, false);
+  if (selected) {
+    const state = await store.getMap(selected.mapId);
+    if (!state) return message(`${selected.name}: STOPPED`, true);
+    const [playerCount, readyAt] = await Promise.all([readPlayerCount(state), readReadyAt(state)]);
+    return message(
+      [
+        `Status: ${state.status}`,
+        `Map: ${selected.name}`,
+        `Session: ${state.sessionName}`,
+        `Ready: ${readyAt ?? "not ready"}`,
+        `Players: ${playerCount ?? "unknown"} / ${state.maxPlayers}`,
+        `Started: ${state.startedAt ?? "N/A"}`,
+        `Expires: ${state.expiresAt ?? "N/A"}`,
+        `Connect: ${state.connectCommand ?? "not available"}`,
+      ].join("\n"),
+      true,
+    );
+  }
+  const definitions = await enabledDefinitions();
+  const states = await store.getMaps(definitions.map((value) => value.mapId));
+  const byId = new Map(states.map((state) => [state.mapId, state]));
+  const lines = await Promise.all(
+    definitions.map(async (definition) => {
+      const state = byId.get(definition.mapId);
+      if (!state) return `${definition.mapId}: STOPPED`;
+      const [playerCount, readyAt] = await Promise.all([readPlayerCount(state), readReadyAt(state)]);
+      return stateLine(state, playerCount, readyAt);
+    }),
+  );
+  return message(lines.join("\n"), true);
+}
+
+async function handleInfo(interaction: DiscordInteraction) {
+  const target = await targetState(interaction);
+  if (typeof target === "string") return message(target, true);
+  const readyAt = await readReadyAt(target.state);
   const passwordLine = allowDiscordPasswordNotification ? `Password: ${await getSecret(secretNames.serverPassword)}` : "Password: hidden";
   return message(
     [
-      `Server: ${state.sessionName}`,
-      `Map: ${state.mapName}`,
-      `Event: ${eventModLabel(state.eventModId)}`,
-      `Connect: ${state.connectCommand ?? "not available"}`,
+      `Server: ${target.state.sessionName}`,
+      `Map: ${target.definition.name}`,
+      `Event: ${eventModLabel(target.state.eventModId)}`,
+      `Ready: ${readyAt ?? "not ready"}`,
+      `Connect: ${target.state.connectCommand ?? "not available"}`,
       passwordLine,
     ].join("\n"),
     true,
   );
 }
 
-async function handleBackup() {
-  const state = await store.getServer();
-  if (state?.status === "RUNNING") {
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: bucketName,
-        Key: `${s3RuntimePrefix}backup-request.json`,
-        Body: JSON.stringify({ requestedAt: new Date().toISOString() }),
-        ContentType: "application/json",
-      }),
-    );
-    return message("Backup requested. The container checks for requests periodically.", true);
+async function handleBackup(interaction: DiscordInteraction) {
+  const target = await targetState(interaction);
+  if (typeof target === "string") return message(target, true);
+  if (target.state.status !== "RUNNING" || !target.state.runId) {
+    return message(`${target.definition.name} is not running. Last backup: ${target.state.lastBackupAt ?? "unknown"}`, true);
   }
-  return message(`ASA server is not running.\nLast backup: ${state?.lastBackupAt ?? "unknown"}`, true);
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucketName,
+      Key: mapStorageKeys(resourcePrefix, target.definition.mapId).backupRequestKey,
+      Body: JSON.stringify({ requestedAt: new Date().toISOString(), runId: target.state.runId }),
+      ContentType: "application/json",
+    }),
+  );
+  return message(`Backup requested for ${target.definition.name}.`, true);
 }
 
 async function handleBudget() {
   const now = new Date();
-  const [budget, state] = await Promise.all([store.getBudget(monthKey(now)), store.getServer()]);
-  const runtimeSeconds = currentMonthRuntimeSeconds({
-    budget,
-    taskStartedAt: state?.status === "RUNNING" || state?.status === "STARTING" ? (state.taskStartedAt ?? state.startedAt) : undefined,
-    now,
-  });
+  const [budget, cluster] = await Promise.all([store.getBudget(monthKey(now)), store.getCluster()]);
+  const runtime = budget?.runtimeSeconds ?? 0;
+  const reserved = budget?.reservedRuntimeSeconds ?? 0;
   return message(
     [
       `Starts: ${budget?.startCount ?? 0}`,
-      `Runtime: ${hours(runtimeSeconds)}h / ${monthlyRuntimeHoursLimit}h`,
+      `Settled runtime: ${hours(runtime)}h`,
+      `Reserved runtime: ${hours(reserved)}h`,
+      `Committed: ${hours(committedRuntimeSeconds(budget))}h / ${monthlyRuntimeHoursLimit}h`,
+      `Active maps: ${cluster?.activeCount ?? 0} / ${cluster?.maxConcurrentMaps ?? maxConcurrentMaps}`,
       `Estimated cost (conservative): ¥${Math.round(budget?.estimatedCostJpy ?? 0)}`,
-      `Estimated cost (Fargate Spot approx.): ¥${Math.round(spotCostJpy(runtimeSeconds))}`,
+      `Estimated cost (Fargate Spot approx.): ¥${Math.round(spotCostJpy(runtime))}`,
     ].join("\n"),
     true,
   );
 }
 
 async function routeCommand(interaction: DiscordInteraction) {
-  const command = subcommandName(interaction);
-  switch (command) {
-    case "start":
-      return handleStart(interaction);
-    case "stop":
-      return handleStop(interaction);
-    case "status":
-      return handleStatus();
-    case "info":
-      return handleInfo();
-    case "backup":
-      return handleBackup();
-    case "budget":
-      return handleBudget();
-    default:
-      return message("Unknown ASA command.", true);
+  try {
+    switch (subcommandName(interaction)) {
+      case "start":
+        return await handleStart(interaction);
+      case "stop":
+        return await handleStop(interaction);
+      case "status":
+        return await handleStatus(interaction);
+      case "info":
+        return await handleInfo(interaction);
+      case "backup":
+        return await handleBackup(interaction);
+      case "budget":
+        return await handleBudget();
+      default:
+        return message("Unknown ASA command.", true);
+    }
+  } catch (error) {
+    return message(`Command failed: ${error instanceof Error ? error.message : String(error)}`, true);
   }
 }
 
 async function handleAsyncCommand(event: AsyncCommandEvent): Promise<void> {
-  try {
-    const result = await routeCommand(event.interaction);
-    await postInteractionFollowup(event.interaction, result.data.content, result.data.flags === EPHEMERAL);
-  } catch (error) {
-    console.error(error);
-    await postInteractionFollowup(event.interaction, `Command failed: ${error instanceof Error ? error.message : String(error)}`, true);
-  }
+  const result = await routeCommand(event.interaction);
+  await postInteractionFollowup(event.interaction, result.data.content, result.data.flags === EPHEMERAL);
 }
 
 export async function handler(event: APIGatewayProxyEventV2 | AsyncCommandEvent): Promise<APIGatewayProxyStructuredResultV2 | undefined> {
@@ -459,17 +563,12 @@ export async function handler(event: APIGatewayProxyEventV2 | AsyncCommandEvent)
     rawBody: body,
   });
   if (!signatureOk) return response(401, { error: "invalid request signature" });
-
   const interaction = JSON.parse(body) as DiscordInteraction;
-  if (interaction.type === InteractionType.Ping) {
-    return response(200, { type: InteractionResponseType.Pong });
-  }
-
+  if (interaction.type === InteractionType.Ping) return response(200, { type: InteractionResponseType.Pong });
   if (interaction.guild_id !== guildId) return response(200, message("This command is not available in this guild.", true));
-
-  if (!isAuthorized(interaction, allowedUsers, allowedRoles))
+  if (!isAuthorized(interaction, allowedUsers, allowedRoles)) {
     return response(200, message("You are not allowed to operate the ASA server.", true));
-
+  }
   try {
     await lambda.send(
       new InvokeCommand({

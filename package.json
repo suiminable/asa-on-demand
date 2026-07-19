@@ -13,6 +13,7 @@
     "lint": "biome lint .",
     "synth": "cdk synth",
     "test": "vitest run",
+    "test:container": "scripts/test-container-scripts.sh",
     "test:watch": "vitest",
     "image:push": "scripts/push-image.sh",
     "discord:register": "tsx scripts/register-discord-commands.ts",

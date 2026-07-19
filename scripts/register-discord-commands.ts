@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { MAX_IDLE_MINUTES, MAX_PLAYERS, MIN_IDLE_MINUTES } from "../src/shared/defaults.js";
+import { MAX_IDLE_MINUTES, MAX_PLAYERS, MAX_SESSION_HOURS, MIN_IDLE_MINUTES, MIN_SESSION_HOURS } from "../src/shared/defaults.js";
 import { ASA_MAPS, isSupportedAsaMap, parseEnabledMaps } from "../src/shared/maps.js";
 
 interface Arguments {
@@ -74,7 +74,12 @@ const unsupportedEnabledMaps = enabledMaps.filter((map) => !isSupportedAsaMap(ma
 if (unsupportedEnabledMaps.length > 0) {
   throw new Error(`enabled-maps contains unsupported map values: ${unsupportedEnabledMaps.join(", ")}`);
 }
-const mapChoices = enabledMaps.length > 0 ? ASA_MAPS.filter((map) => enabledMaps.includes(map.value)) : ASA_MAPS;
+const mapChoices = (enabledMaps.length > 0 ? ASA_MAPS.filter((map) => enabledMaps.includes(map.value)) : ASA_MAPS).map(
+  ({ name, value }) => ({
+    name,
+    value,
+  }),
+);
 if (enabledMaps.length > 0 && mapChoices.length === 0) {
   throw new Error("enabled-maps did not match any supported maps.");
 }
@@ -100,6 +105,14 @@ const commands = [
             required: false,
             min_value: MIN_IDLE_MINUTES,
             max_value: MAX_IDLE_MINUTES,
+          },
+          {
+            name: "session_hours",
+            description: "Maximum reserved session length in task-hours",
+            type: 4,
+            required: false,
+            min_value: MIN_SESSION_HOURS,
+            max_value: MAX_SESSION_HOURS,
           },
           {
             name: "map",
@@ -128,21 +141,31 @@ const commands = [
         name: "stop",
         description: "Stop the private ARK: Survival Ascended server.",
         type: 1,
+        options: [
+          { name: "map", description: "Map name (required when multiple maps are active)", type: 3, required: false, choices: mapChoices },
+        ],
       },
       {
         name: "status",
         description: "Show ASA server status.",
         type: 1,
+        options: [{ name: "map", description: "Map name; omit to list all enabled maps", type: 3, required: false, choices: mapChoices }],
       },
       {
         name: "info",
         description: "Show ASA connection info.",
         type: 1,
+        options: [
+          { name: "map", description: "Map name (required when multiple maps are active)", type: 3, required: false, choices: mapChoices },
+        ],
       },
       {
         name: "backup",
         description: "Request a save backup or show the latest backup.",
         type: 1,
+        options: [
+          { name: "map", description: "Map name (required when multiple maps are active)", type: 3, required: false, choices: mapChoices },
+        ],
       },
       {
         name: "budget",

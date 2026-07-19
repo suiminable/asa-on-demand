@@ -47,11 +47,84 @@ describe("AsaFargateStack", () => {
     template.resourceCountIs("AWS::ElasticLoadBalancingV2::LoadBalancer", 0);
   });
 
-  it("opens only the expected UDP ports", () => {
+  it("opens game UDP publicly and NFS only from the server security group", () => {
     const template = synthTemplate();
     template.hasResourceProperties("AWS::EC2::SecurityGroupIngress", { IpProtocol: "udp", FromPort: 7777, ToPort: 7777 });
     template.hasResourceProperties("AWS::EC2::SecurityGroupIngress", { IpProtocol: "udp", FromPort: 7778, ToPort: 7778 });
-    template.resourceCountIs("AWS::EC2::SecurityGroupIngress", 2);
+    template.hasResourceProperties("AWS::EC2::SecurityGroupIngress", {
+      IpProtocol: "tcp",
+      FromPort: 2049,
+      ToPort: 2049,
+      SourceSecurityGroupId: Match.anyValue(),
+    });
+    template.resourceCountIs("AWS::EC2::SecurityGroupIngress", 3);
+  });
+
+  it("mounts retained encrypted EFS through an IAM-authorized access point and backs it up", () => {
+    const template = synthTemplate();
+    template.hasResource("AWS::EFS::FileSystem", { DeletionPolicy: "Retain", Properties: { Encrypted: true } });
+    template.resourceCountIs("AWS::EFS::AccessPoint", 2);
+    template.hasResourceProperties("AWS::EFS::AccessPoint", {
+      PosixUser: { Uid: "10001", Gid: "10001" },
+      RootDirectory: { CreationInfo: { OwnerUid: "10001", OwnerGid: "10001", Permissions: "0750" }, Path: "/cluster-data" },
+    });
+    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      Volumes: Match.arrayWith([
+        Match.objectLike({
+          Name: "AsaClusterData",
+          EFSVolumeConfiguration: Match.objectLike({
+            TransitEncryption: "ENABLED",
+            AuthorizationConfig: Match.objectLike({ IAM: "ENABLED" }),
+          }),
+        }),
+      ]),
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({ MountPoints: [{ ContainerPath: "/asa/cluster", ReadOnly: false, SourceVolume: "AsaClusterData" }] }),
+      ]),
+    });
+    template.resourceCountIs("AWS::Backup::BackupPlan", 1);
+    template.hasResource("AWS::Backup::BackupVault", { DeletionPolicy: "Retain" });
+    template.hasResourceProperties("AWS::Backup::BackupPlan", {
+      BackupPlan: {
+        BackupPlanRule: Match.arrayWith([
+          Match.objectLike({ RuleName: "HourlySevenDays", Lifecycle: { DeleteAfterDays: 7 } }),
+          Match.objectLike({ RuleName: "DailyRetention", Lifecycle: { DeleteAfterDays: 35 } }),
+        ]),
+      },
+    });
+    const selections = Object.values(template.findResources("AWS::Backup::BackupSelection"));
+    expect(selections).toHaveLength(1);
+    expect(selections[0].Properties.BackupSelection.Resources).toHaveLength(1);
+    expect(JSON.stringify(selections[0].Properties.BackupSelection.Resources[0])).toContain(":elasticfilesystem:");
+  });
+
+  it("runs only the dedicated storage migration task as root on the EFS admin mount", () => {
+    const template = synthTemplate();
+    template.hasResourceProperties("AWS::EFS::AccessPoint", {
+      PosixUser: { Uid: "0", Gid: "0" },
+      RootDirectory: { Path: "/" },
+    });
+    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          User: "0",
+          Environment: Match.arrayWith([
+            { Name: "ASA_CLUSTER_DIR", Value: "/asa/efs-root/cluster-data" },
+            { Name: "EFS_ADMIN_ROOT", Value: "/asa/efs-root" },
+          ]),
+          MountPoints: [{ ContainerPath: "/asa/efs-root", ReadOnly: false, SourceVolume: "AsaClusterAdminData" }],
+        }),
+      ]),
+    });
+    const taskDefinitions = Object.values(template.findResources("AWS::ECS::TaskDefinition"));
+    const rootContainers = taskDefinitions
+      .flatMap((resource) => resource.Properties.ContainerDefinitions)
+      .filter((container) => container.User === "0");
+    expect(rootContainers).toHaveLength(1);
+    const migrationTask = taskDefinitions.find((resource) =>
+      resource.Properties.ContainerDefinitions.some((container: { User?: string }) => container.User === "0"),
+    );
+    expect(migrationTask?.Properties).toMatchObject({ Cpu: "2048", Memory: "4096", EphemeralStorage: { SizeInGiB: 100 } });
   });
 
   it("configures Fargate Linux task storage and stop timeout", () => {
@@ -92,6 +165,7 @@ describe("AsaFargateStack", () => {
         }),
       },
     });
+    template.hasOutput("AsaClusterId", { Value: "asa-on-demand" });
   });
 
   it("configures and validates the default idle timeout", () => {
@@ -101,6 +175,53 @@ describe("AsaFargateStack", () => {
     });
     expect(() => synthTemplate({ defaultIdleMinutes: 0 })).toThrow("defaultIdleMinutes must be an integer from 1 to 1440");
     expect(() => synthTemplate({ defaultIdleMinutes: 1.5 })).toThrow("defaultIdleMinutes must be an integer from 1 to 1440");
+  });
+
+  it("keeps the rollout at one Map until parallel transfer is explicitly enabled", () => {
+    const disabled = synthTemplate({ maxConcurrentMaps: 2 });
+    disabled.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: { Variables: Match.objectLike({ MAX_CONCURRENT_MAPS: "1" }) },
+    });
+    const enabled = synthTemplate({ enableParallelMapTransfer: true, maxConcurrentMaps: 2 });
+    enabled.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: { Variables: Match.objectLike({ MAX_CONCURRENT_MAPS: "2" }) },
+    });
+    expect(() => synthTemplate({ maxConcurrentMaps: 0 })).toThrow("maxConcurrentMaps must be an integer from 1 to 10");
+  });
+
+  it("requires a complete Map DNS configuration", () => {
+    expect(() => synthTemplate({ domainName: "asa.example.test" })).toThrow(
+      "Contexts hostedZoneId and domainName must be configured together.",
+    );
+    expect(() => synthTemplate({ hostedZoneId: "zone-1" })).toThrow("Contexts hostedZoneId and domainName must be configured together.");
+    expect(() => synthTemplate({ hostedZoneId: "zone-1", domainName: "asa.example.test" })).toThrow("hostedZoneName context is required");
+    const configured = synthTemplate({ hostedZoneId: "zone-1", hostedZoneName: "example.test", domainName: "asa.example.test" });
+    configured.hasOutput("AsaMapDnsPattern", { Value: "<mapId>.asa.example.test" });
+    configured.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([Match.objectLike({ Action: "route53:ChangeResourceRecordSets", Effect: "Allow" })]),
+      },
+    });
+  });
+
+  it("enables operation reconciliation and TTL for the Map state schema", () => {
+    const template = synthTemplate();
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TimeToLiveSpecification: { AttributeName: "ttl", Enabled: true },
+      GlobalSecondaryIndexes: Match.arrayWith([
+        Match.objectLike({
+          IndexName: "operations-by-phase",
+          KeySchema: [
+            { AttributeName: "phase", KeyType: "HASH" },
+            { AttributeName: "updatedAt", KeyType: "RANGE" },
+          ],
+        }),
+      ]),
+    });
+    template.hasResourceProperties("AWS::Events::Rule", { ScheduleExpression: "rate(5 minutes)", State: "ENABLED" });
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: { Variables: Match.objectLike({ STOP_SERVER_FUNCTION_ARN: Match.anyValue() }) },
+    });
   });
 
   it("allows the Discord Lambda to invoke its exact function ARN", () => {
@@ -171,36 +292,38 @@ describe("AsaFargateStack", () => {
     expect(() => synthTemplate({ asaBuildId: "invalid/tag" })).toThrow("Context asaBuildId must be a valid ECR image tag.");
   });
 
-  it("keeps the default S3 layout when no resource prefix is provided", () => {
+  it("uses the map-scoped S3 layout when no resource prefix is provided", () => {
     const template = synthTemplate();
-    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
-      ContainerDefinitions: Match.arrayWith([
-        Match.objectLike({
-          Environment: Match.arrayWith([
-            { Name: "S3_SAVE_KEY", Value: "saves/current.tar.zst" },
-            { Name: "S3_BACKUP_PREFIX", Value: "backups/" },
-            { Name: "S3_CONFIG_PREFIX", Value: "config/" },
-            { Name: "S3_RUNTIME_PREFIX", Value: "runtime/" },
-            { Name: "BACKUP_REQUEST_KEY", Value: "runtime/backup-request.json" },
-            { Name: "HEARTBEAT_KEY", Value: "runtime/heartbeat.json" },
-          ]),
-        }),
-      ]),
-    });
-  });
-
-  it("scopes S3 paths, scheduler name, and config namespace by resource prefix", () => {
-    const template = synthTemplate({ resourcePrefix: "maps/the-island" });
     template.hasResourceProperties("AWS::ECS::TaskDefinition", {
       ContainerDefinitions: Match.arrayWith([
         Match.objectLike({
           Environment: Match.arrayWith([
             { Name: "S3_SAVE_KEY", Value: "maps/the-island/saves/current.tar.zst" },
             { Name: "S3_BACKUP_PREFIX", Value: "maps/the-island/backups/" },
-            { Name: "S3_CONFIG_PREFIX", Value: "maps/the-island/config/" },
             { Name: "S3_RUNTIME_PREFIX", Value: "maps/the-island/runtime/" },
+            { Name: "S3_COMMON_CONFIG_PREFIX", Value: "config/common/" },
+            { Name: "S3_MAP_CONFIG_PREFIX", Value: "config/maps/the-island/" },
             { Name: "BACKUP_REQUEST_KEY", Value: "maps/the-island/runtime/backup-request.json" },
             { Name: "HEARTBEAT_KEY", Value: "maps/the-island/runtime/heartbeat.json" },
+          ]),
+        }),
+      ]),
+    });
+  });
+
+  it("scopes the map layout and config namespace by resource prefix", () => {
+    const template = synthTemplate({ resourcePrefix: "maps/the-island" });
+    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          Environment: Match.arrayWith([
+            { Name: "S3_SAVE_KEY", Value: "maps/the-island/maps/the-island/saves/current.tar.zst" },
+            { Name: "S3_BACKUP_PREFIX", Value: "maps/the-island/maps/the-island/backups/" },
+            { Name: "S3_RUNTIME_PREFIX", Value: "maps/the-island/maps/the-island/runtime/" },
+            { Name: "S3_COMMON_CONFIG_PREFIX", Value: "maps/the-island/config/common/" },
+            { Name: "S3_MAP_CONFIG_PREFIX", Value: "maps/the-island/config/maps/the-island/" },
+            { Name: "BACKUP_REQUEST_KEY", Value: "maps/the-island/maps/the-island/runtime/backup-request.json" },
+            { Name: "HEARTBEAT_KEY", Value: "maps/the-island/maps/the-island/runtime/heartbeat.json" },
           ]),
         }),
       ]),
@@ -209,8 +332,8 @@ describe("AsaFargateStack", () => {
       Environment: {
         Variables: Match.objectLike({
           CONFIG_PREFIX: "/asa/maps/the-island",
-          S3_RUNTIME_PREFIX: "maps/the-island/runtime/",
-          STOP_SCHEDULE_NAME: "asa-maps-the-island-auto-stop",
+          RESOURCE_PREFIX: "maps/the-island/",
+          ENVIRONMENT_NAME: "maps-the-island",
         }),
       },
     });
@@ -221,12 +344,7 @@ describe("AsaFargateStack", () => {
             Action: "s3:ListBucket",
             Condition: {
               StringLike: {
-                "s3:prefix": [
-                  "maps/the-island/config/*",
-                  "maps/the-island/saves/*",
-                  "maps/the-island/runtime/*",
-                  "maps/the-island/backups/*",
-                ],
+                "s3:prefix": ["maps/the-island/config/*", "maps/the-island/maps/*"],
               },
             },
           }),

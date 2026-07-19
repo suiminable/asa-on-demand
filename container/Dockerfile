@@ -22,6 +22,7 @@ RUN dpkg --add-architecture i386 \
       zstd \
       procps \
       netcat-openbsd \
+      util-linux \
       python3 \
       steamcmd \
       lib32gcc-s1 \
@@ -38,7 +39,7 @@ RUN dpkg --add-architecture i386 \
 
 ENV PATH="/usr/games:${PATH}"
 
-RUN mkdir -p /asa/server /asa/work /asa/tmp /asa/scripts
+RUN mkdir -p /asa/server /asa/work /asa/tmp /asa/scripts /asa/cluster
 
 FROM base AS asa-server
 
@@ -84,7 +85,7 @@ RUN su -s /bin/bash asa -c 'mkdir -p /home/asa/.local/share/Steam \
     SteamAppId=2430930 SteamGameId=2430930 \
     && "$PROTONPATH/proton" run "$PROTONPATH/files/lib/wine/x86_64-windows/cmd.exe" /c exit'
 
-COPY entrypoint.sh backup.sh restore.sh notify-discord.sh healthcheck.sh rcon.py configure-server.py /asa/scripts/
+COPY entrypoint.sh backup.sh restore.sh notify-discord.sh healthcheck.sh cluster-probe.sh migrate-storage.sh rcon.py configure-server.py /asa/scripts/
 RUN chmod +x /asa/scripts/*.sh /asa/scripts/*.py
 
 WORKDIR /asa
