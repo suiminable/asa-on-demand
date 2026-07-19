@@ -217,7 +217,6 @@ export async function handler(event: EventBridgeEvent<"ECS Task State Change", E
     mapId: identity.mapId,
     runId: identity.runId,
     taskArn: detail.taskArn,
-    reservations: state.reservations,
     budgets,
     reason,
     eventVersion,

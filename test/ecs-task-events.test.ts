@@ -77,10 +77,6 @@ beforeEach(() => {
     taskArn: "task-1",
     status: "STOPPING",
     publicIp: "203.0.113.10",
-    reservations: [
-      { budgetPk: "BUDGET#2026-07", runtimeSeconds: 3600 },
-      { budgetPk: "BUDGET#2026-08", runtimeSeconds: 10_800 },
-    ],
   });
   mocks.settleStoppedMapTask.mockReset().mockResolvedValue(true);
   mocks.updateMapFromRunningEvent.mockReset().mockResolvedValue({ sessionName: "private-asa-island" });
@@ -102,7 +98,7 @@ beforeEach(() => {
 });
 
 describe("generation-aware ECS task settlement", () => {
-  it("settles runtime slices and releases the matching reservation", async () => {
+  it("settles actual runtime slices across JST month boundaries", async () => {
     await handler({
       detail: {
         clusterArn: "cluster",
@@ -120,10 +116,6 @@ describe("generation-aware ECS task settlement", () => {
       mapId: "the-island",
       runId: "run-island-12345678",
       taskArn: "task-1",
-      reservations: [
-        { budgetPk: "BUDGET#2026-07", runtimeSeconds: 3600 },
-        { budgetPk: "BUDGET#2026-08", runtimeSeconds: 10_800 },
-      ],
       budgets: [
         { budgetPk: "BUDGET#2026-07", runtimeSeconds: 3600, estimatedCostJpy: 52, estimatedCostUsd: 52 / 150 },
         { budgetPk: "BUDGET#2026-08", runtimeSeconds: 7200, estimatedCostJpy: 104, estimatedCostUsd: 104 / 150 },

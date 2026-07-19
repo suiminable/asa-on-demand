@@ -2,11 +2,10 @@ import nacl from "tweetnacl";
 import { describe, expect, it } from "vitest";
 import {
   activeRuntimeSecondsThisMonth,
-  canReserve,
   canStart,
+  currentMonthRuntimeSeconds,
   hours,
   monthKey,
-  splitReservationByJstMonth,
   splitRuntimeByJstMonth,
   startOfJstMonth,
 } from "../src/shared/budget.js";
@@ -52,22 +51,14 @@ describe("Budget helpers", () => {
   });
 
   it("rejects starts only after the runtime limit has been reached", () => {
-    const budget = (runtimeSeconds: number) => ({
-      pk: "BUDGET#2026-06",
-      runtimeSeconds,
-      estimatedCostJpy: 0,
-      estimatedCostUsd: 0,
-      startCount: 0,
-      updatedAt: "",
-    });
     expect(
       canStart({
-        budget: budget(80 * 3600),
+        currentMonthRuntimeSeconds: 80 * 3600,
         monthlyRuntimeHoursLimit: 80,
       }).ok,
     ).toBe(false);
-    expect(canStart({ budget: budget(79 * 3600 + 3599), monthlyRuntimeHoursLimit: 80 }).ok).toBe(true);
-    expect(canStart({ budget: undefined, monthlyRuntimeHoursLimit: 80 }).ok).toBe(true);
+    expect(canStart({ currentMonthRuntimeSeconds: 79 * 3600 + 3599, monthlyRuntimeHoursLimit: 80 }).ok).toBe(true);
+    expect(canStart({ currentMonthRuntimeSeconds: 0, monthlyRuntimeHoursLimit: 80 }).ok).toBe(true);
   });
 
   it("calculates active runtime from the start of the JST month", () => {
@@ -83,33 +74,22 @@ describe("Budget helpers", () => {
     ]);
   });
 
-  it("reserves task-hours across a JST month boundary and includes existing reservations", () => {
-    const slices = splitReservationByJstMonth(new Date("2026-07-31T14:00:00.000Z"), 3 * 3600);
-    expect(slices).toEqual([
-      { budgetPk: "BUDGET#2026-07", runtimeSeconds: 3600 },
-      { budgetPk: "BUDGET#2026-08", runtimeSeconds: 7200 },
-    ]);
+  it("adds actual elapsed runtime for every active Map to settled runtime", () => {
+    const now = new Date("2026-07-17T01:00:00.000Z");
     expect(
-      canReserve({
-        reservations: [{ budgetPk: "BUDGET#2026-07", runtimeSeconds: 3600 }],
-        budgets: new Map([
-          [
-            "BUDGET#2026-07",
-            {
-              pk: "BUDGET#2026-07",
-              runtimeSeconds: 79 * 3600,
-              reservedRuntimeSeconds: 3600,
-              committedRuntimeSeconds: 80 * 3600,
-              estimatedCostJpy: 0,
-              estimatedCostUsd: 0,
-              startCount: 1,
-              updatedAt: "",
-            },
-          ],
-        ]),
-        monthlyRuntimeHoursLimit: 80,
-      }).ok,
-    ).toBe(false);
+      currentMonthRuntimeSeconds({
+        budget: {
+          pk: "BUDGET#2026-07",
+          runtimeSeconds: 60 * 60,
+          estimatedCostJpy: 0,
+          estimatedCostUsd: 0,
+          startCount: 2,
+          updatedAt: "",
+        },
+        activeTaskStartedAt: ["2026-07-17T00:30:00.000Z", "2026-07-17T00:45:00.000Z"],
+        now,
+      }),
+    ).toBe(105 * 60);
   });
 });
 

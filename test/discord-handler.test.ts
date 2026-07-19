@@ -11,9 +11,8 @@ const mocks = vi.hoisted(() => ({
   getMap: vi.fn(),
   getMaps: vi.fn(),
   getBudget: vi.fn(),
-  getBudgets: vi.fn(),
   getCluster: vi.fn(),
-  reserveMapStart: vi.fn(),
+  claimMapStart: vi.fn(),
   attachStartedTask: vi.fn(),
   markOperationScheduled: vi.fn(),
   markMapStopping: vi.fn(),
@@ -79,9 +78,8 @@ vi.mock("../src/shared/state.js", () => ({
     getMap = mocks.getMap;
     getMaps = mocks.getMaps;
     getBudget = mocks.getBudget;
-    getBudgets = mocks.getBudgets;
     getCluster = mocks.getCluster;
-    reserveMapStart = mocks.reserveMapStart;
+    claimMapStart = mocks.claimMapStart;
     attachStartedTask = mocks.attachStartedTask;
     markOperationScheduled = mocks.markOperationScheduled;
     markMapStopping = mocks.markMapStopping;
@@ -131,7 +129,6 @@ function mapState(mapId: string, arkMapName: string, taskArn: string) {
     clusterArn: "cluster",
     startedAt: new Date(Date.now() - 60_000).toISOString(),
     taskStartedAt: new Date(Date.now() - 60_000).toISOString(),
-    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
     publicIp: "192.0.2.1",
     connectCommand: "open 192.0.2.1:7777",
     sessionName: `private-asa-${mapId}`,
@@ -146,7 +143,6 @@ function mapState(mapId: string, arkMapName: string, taskArn: string) {
     lastBackupAt: null,
     lastStopReason: null,
     lastEcsEventVersion: 1,
-    reservations: [{ budgetPk: "BUDGET#2026-07", runtimeSeconds: 28_800 }],
     updatedAt: new Date().toISOString(),
   };
 }
@@ -195,9 +191,8 @@ beforeEach(async () => {
   mocks.getMap.mockReset();
   mocks.getMaps.mockReset().mockResolvedValue([]);
   mocks.getBudget.mockReset();
-  mocks.getBudgets.mockReset().mockResolvedValue(new Map());
   mocks.getCluster.mockReset();
-  mocks.reserveMapStart.mockReset().mockResolvedValue(true);
+  mocks.claimMapStart.mockReset().mockResolvedValue(true);
   mocks.attachStartedTask.mockReset().mockResolvedValue(true);
   mocks.markOperationScheduled.mockReset().mockResolvedValue(true);
   mocks.markMapStopping.mockReset().mockResolvedValue(true);
@@ -218,17 +213,23 @@ describe("Discord map control", () => {
       "start",
       [
         { name: "map", value: "ScorchedEarth_WP" },
-        { name: "session_hours", value: 8 },
+        { name: "idle_minutes", value: 45 },
         { name: "public_notify", value: false },
       ],
       "interaction-start-scored",
     );
     expect(content).toContain("Scorched Earth");
     expect(content).toContain("private-asa-scorched");
-    expect(mocks.reserveMapStart).toHaveBeenCalledWith(
+    expect(content).toContain("Idle auto-stop: 45m");
+    expect(mocks.claimMapStart).toHaveBeenCalledWith(
       expect.objectContaining({
         maxConcurrentMaps: 2,
-        state: expect.objectContaining({ pk: "MAP#scorched-earth", mapId: "scorched-earth", arkMapName: "ScorchedEarth_WP" }),
+        state: expect.objectContaining({
+          pk: "MAP#scorched-earth",
+          mapId: "scorched-earth",
+          arkMapName: "ScorchedEarth_WP",
+          idleTimeoutMinutes: 45,
+        }),
       }),
     );
     const command = mocks.ecsSend.mock.calls[0][0] as {
@@ -259,7 +260,7 @@ describe("Discord map control", () => {
     expect(JSON.parse(create.input.Target.Input)).toMatchObject({ mapId: "scorched-earth", expectedTaskArn: "task-1" });
   });
 
-  it("keeps the reservation until STOPPED settlement when post-launch schedule creation fails", async () => {
+  it("keeps the claimed task tracked until STOPPED settlement when post-launch schedule creation fails", async () => {
     mocks.schedulerSend.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error("scheduler unavailable"));
 
     const content = await runAsync(
@@ -283,8 +284,26 @@ describe("Discord map control", () => {
   });
 
   it("surfaces a concurrent claim rejection without calling RunTask", async () => {
-    mocks.reserveMapStart.mockResolvedValue(false);
-    expect(await runAsync("start", [{ name: "map", value: "TheIsland_WP" }])).toContain("already active, concurrency is full");
+    mocks.claimMapStart.mockResolvedValue(false);
+    expect(await runAsync("start", [{ name: "map", value: "TheIsland_WP" }])).toContain("already active or concurrency is full");
+    expect(mocks.ecsSend).not.toHaveBeenCalled();
+  });
+
+  it("blocks a start when settled plus active Map runtime reaches the monthly limit", async () => {
+    const activeMap = mapState("scorched-earth", "ScorchedEarth_WP", "task-scorched");
+    activeMap.taskStartedAt = new Date(Date.now() - 2 * 60_000).toISOString();
+    mocks.getMaps.mockResolvedValue([activeMap]);
+    mocks.getBudget.mockResolvedValue({
+      pk: "BUDGET#current",
+      runtimeSeconds: 79 * 3600 + 59 * 60,
+      estimatedCostJpy: 0,
+      estimatedCostUsd: 0,
+      startCount: 1,
+      updatedAt: "",
+    });
+
+    expect(await runAsync("start", [{ name: "map", value: "TheIsland_WP" }])).toContain("Monthly runtime limit has been reached");
+    expect(mocks.claimMapStart).not.toHaveBeenCalled();
     expect(mocks.ecsSend).not.toHaveBeenCalled();
   });
 

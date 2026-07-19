@@ -1,11 +1,10 @@
-import { activeRuntimeSecondsThisMonth } from "./budget.js";
+import { currentMonthRuntimeSeconds as calculateCurrentMonthRuntimeSeconds } from "./budget.js";
 import { validHeartbeat } from "./heartbeat.js";
 import type { BudgetState, MapServerState } from "./types.js";
 
 export type IdleCheckRule =
   | "NOT_RUNNING"
   | "BUDGET_EXCEEDED"
-  | "SESSION_EXPIRED"
   | "STARTING"
   | "HEARTBEAT_INVALID"
   | "SAMPLE_REUSED"
@@ -21,7 +20,7 @@ export interface IdleStateUpdate {
 export interface IdleCheckDecision {
   action: "STOP" | "DELETE_SCHEDULE" | "NONE";
   rule: IdleCheckRule;
-  reason?: "IDLE_TIMEOUT" | "BUDGET_EXCEEDED" | "SESSION_EXPIRED";
+  reason?: "IDLE_TIMEOUT" | "BUDGET_EXCEEDED";
   stateUpdate?: IdleStateUpdate;
   heartbeatAgeSeconds?: number;
   playerCount?: number;
@@ -38,26 +37,21 @@ export function evaluateIdleCheck(params: {
   state: MapServerState | undefined;
   heartbeat: unknown;
   budget: BudgetState | undefined;
+  activeTaskStartedAt: ReadonlyArray<string | null | undefined>;
   now: Date;
   monthlyRuntimeHoursLimit: number;
   heartbeatFreshnessSeconds: number;
 }): IdleCheckDecision {
   const { state, now } = params;
+  const currentMonthRuntimeSeconds = calculateCurrentMonthRuntimeSeconds({
+    budget: params.budget,
+    activeTaskStartedAt: params.activeTaskStartedAt,
+    now,
+  });
   if (!state?.taskArn || !state.runId || (state.status !== "RUNNING" && state.status !== "STARTING")) {
-    return { action: "DELETE_SCHEDULE", rule: "NOT_RUNNING", currentMonthRuntimeSeconds: params.budget?.runtimeSeconds ?? 0 };
+    return { action: "DELETE_SCHEDULE", rule: "NOT_RUNNING", currentMonthRuntimeSeconds };
   }
 
-  if (state.expiresAt && Date.parse(state.expiresAt) <= now.getTime()) {
-    return {
-      action: "STOP",
-      rule: "SESSION_EXPIRED",
-      reason: "SESSION_EXPIRED",
-      currentMonthRuntimeSeconds: params.budget?.runtimeSeconds ?? 0,
-    };
-  }
-
-  const activeRuntime = activeRuntimeSecondsThisMonth(state.taskStartedAt ?? state.startedAt, now);
-  const currentMonthRuntimeSeconds = (params.budget?.runtimeSeconds ?? 0) + activeRuntime;
   if (currentMonthRuntimeSeconds >= params.monthlyRuntimeHoursLimit * 3600) {
     return {
       action: "STOP",

@@ -1,10 +1,5 @@
 export type ServerStatus = "STOPPED" | "STARTING" | "RUNNING" | "STOPPING" | "ERROR";
 
-export interface RuntimeReservation {
-  budgetPk: string;
-  runtimeSeconds: number;
-}
-
 export interface MapServerState {
   pk: `MAP#${string}`;
   mapId: string;
@@ -15,7 +10,6 @@ export interface MapServerState {
   clusterArn: string;
   startedAt: string | null;
   taskStartedAt: string | null;
-  expiresAt: string | null;
   publicIp: string | null;
   connectCommand: string | null;
   sessionName: string;
@@ -30,7 +24,6 @@ export interface MapServerState {
   lastBackupAt: string | null;
   lastStopReason: string | null;
   lastEcsEventVersion: number | null;
-  reservations: RuntimeReservation[];
   updatedAt: string;
 }
 
@@ -69,8 +62,6 @@ export interface ClusterState {
 export interface BudgetState {
   pk: string;
   runtimeSeconds: number;
-  reservedRuntimeSeconds?: number;
-  committedRuntimeSeconds?: number;
   estimatedCostUsd: number;
   estimatedCostJpy: number;
   startCount: number;
@@ -85,7 +76,6 @@ export interface StartOperation {
   mapId: string;
   phase: OperationPhase;
   taskArn: string | null;
-  reservations: RuntimeReservation[];
   createdAt: string;
   updatedAt: string;
   ttl: number;

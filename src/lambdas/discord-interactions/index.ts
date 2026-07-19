@@ -4,7 +4,7 @@ import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CreateScheduleCommand, DeleteScheduleCommand, SchedulerClient } from "@aws-sdk/client-scheduler";
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from "aws-lambda";
-import { canReserve, committedRuntimeSeconds, hours, monthKey, splitReservationByJstMonth } from "../../shared/budget.js";
+import { canStart, currentMonthRuntimeSeconds, hours, monthKey } from "../../shared/budget.js";
 import {
   getJsonArrayParameter,
   getParameter,
@@ -17,13 +17,10 @@ import {
 import {
   DEFAULT_IDLE_MINUTES,
   DEFAULT_MAX_PLAYERS,
-  DEFAULT_SESSION_HOURS,
   HEARTBEAT_FRESHNESS_SECONDS,
   MAX_IDLE_MINUTES,
   MAX_PLAYERS,
-  MAX_SESSION_HOURS,
   MIN_IDLE_MINUTES,
-  MIN_SESSION_HOURS,
   STATE_SCHEMA_VERSION,
 } from "../../shared/defaults.js";
 import {
@@ -44,12 +41,13 @@ import {
 import { eventModLabel, parseEventModId } from "../../shared/events.js";
 import { parseHeartbeatJson, parseReadyJson } from "../../shared/heartbeat.js";
 import {
+  ASA_MAPS,
+  type AsaMapDefinition,
   enabledMapDefinitions,
   isSupportedAsaMap,
   mapByArkMapName,
   parseEnabledMaps,
   sessionNameFor,
-  type AsaMapDefinition,
 } from "../../shared/maps.js";
 import { mapStorageKeys, stopScheduleName, taskGroup } from "../../shared/resources.js";
 import { StateStore } from "../../shared/state.js";
@@ -110,6 +108,19 @@ function runIdFor(interaction: DiscordInteraction): string {
 
 function active(state: MapServerState): boolean {
   return state.status === "STARTING" || state.status === "RUNNING" || state.status === "STOPPING";
+}
+
+async function currentRuntime(now: Date) {
+  const [budget, states] = await Promise.all([
+    store.getBudget(monthKey(now)),
+    store.getMaps(ASA_MAPS.map((definition) => definition.mapId)),
+  ]);
+  const runtimeSeconds = currentMonthRuntimeSeconds({
+    budget,
+    activeTaskStartedAt: states.filter(active).map((state) => state.taskStartedAt ?? state.startedAt),
+    now,
+  });
+  return { budget, runtimeSeconds };
 }
 
 async function enabledDefinitions(): Promise<AsaMapDefinition[]> {
@@ -176,16 +187,11 @@ async function createStopSchedule(state: MapServerState): Promise<void> {
 async function handleStart(interaction: DiscordInteraction) {
   const now = new Date();
   const idleTimeoutMinutes = Number(optionValue<number>(interaction, "idle_minutes") ?? defaultIdleMinutes);
-  const sessionHours = Number(optionValue<number>(interaction, "session_hours") ?? DEFAULT_SESSION_HOURS);
   let maxPlayers = Math.min(Math.max(Number(optionValue<number>(interaction, "max_players") ?? DEFAULT_MAX_PLAYERS), 1), MAX_PLAYERS);
   const publicNotify = optionValue<boolean>(interaction, "public_notify") ?? true;
   if (!Number.isInteger(idleTimeoutMinutes) || idleTimeoutMinutes < MIN_IDLE_MINUTES || idleTimeoutMinutes > MAX_IDLE_MINUTES) {
     return message(`idle_minutes must be an integer from ${MIN_IDLE_MINUTES} to ${MAX_IDLE_MINUTES}.`, true);
   }
-  if (!Number.isInteger(sessionHours) || sessionHours < MIN_SESSION_HOURS || sessionHours > MAX_SESSION_HOURS) {
-    return message(`session_hours must be an integer from ${MIN_SESSION_HOURS} to ${MAX_SESSION_HOURS}.`, true);
-  }
-
   let definition: AsaMapDefinition;
   try {
     const selected = await selectedDefinition(interaction, true);
@@ -213,14 +219,12 @@ async function handleStart(interaction: DiscordInteraction) {
     maxPlayers = Math.min(Math.max(configuredMaxPlayers, 1), MAX_PLAYERS);
   }
 
-  const reservations = splitReservationByJstMonth(now, sessionHours * 3600);
-  const budgets = await store.getBudgets(reservations.map((value) => value.budgetPk));
-  const budgetDecision = canReserve({ reservations, budgets, monthlyRuntimeHoursLimit });
+  const { runtimeSeconds } = await currentRuntime(now);
+  const budgetDecision = canStart({ currentMonthRuntimeSeconds: runtimeSeconds, monthlyRuntimeHoursLimit });
   if (!budgetDecision.ok) return message(budgetDecision.reason, true);
 
   const runId = runIdFor(interaction);
   const userId = userIdFromInteraction(interaction) ?? null;
-  const expiresAt = new Date(now.getTime() + sessionHours * 3600_000).toISOString();
   const state: MapServerState = {
     pk: `MAP#${definition.mapId}`,
     mapId: definition.mapId,
@@ -231,7 +235,6 @@ async function handleStart(interaction: DiscordInteraction) {
     clusterArn,
     startedAt: now.toISOString(),
     taskStartedAt: null,
-    expiresAt,
     publicIp: null,
     connectCommand: null,
     sessionName,
@@ -246,7 +249,6 @@ async function handleStart(interaction: DiscordInteraction) {
     lastBackupAt: null,
     lastStopReason: null,
     lastEcsEventVersion: null,
-    reservations,
     updatedAt: now.toISOString(),
   };
   const operation: StartOperation = {
@@ -255,20 +257,19 @@ async function handleStart(interaction: DiscordInteraction) {
     mapId: definition.mapId,
     phase: "CLAIMED",
     taskArn: null,
-    reservations,
     createdAt: now.toISOString(),
     updatedAt: now.toISOString(),
     ttl: Math.floor(now.getTime() / 1000) + 7 * 24 * 3600,
   };
-  const reserved = await store.reserveMapStart({
+  const claimed = await store.claimMapStart({
     state,
     operation,
     maxConcurrentMaps,
-    monthlyRuntimeSecondsLimit: monthlyRuntimeHoursLimit * 3600,
+    budgetPk: monthKey(now),
     schemaVersion: STATE_SCHEMA_VERSION,
   });
-  if (!reserved) {
-    return message(`Cannot start ${definition.name}: it is already active, concurrency is full, or the budget reservation raced.`, true);
+  if (!claimed) {
+    return message(`Cannot start ${definition.name}: it is already active or concurrency is full.`, true);
   }
 
   const keys = mapStorageKeys(resourcePrefix, definition.mapId);
@@ -330,7 +331,7 @@ async function handleStart(interaction: DiscordInteraction) {
     if (!startedTaskArn) throw new Error("RunTask returned no taskArn.");
     taskArn = startedTaskArn;
   } catch (error) {
-    await store.rollbackMapStart(definition.mapId, runId, reservations, error instanceof Error ? error.message : String(error));
+    await store.rollbackMapStart(definition.mapId, runId, error instanceof Error ? error.message : String(error));
     throw error;
   }
 
@@ -357,14 +358,14 @@ async function handleStart(interaction: DiscordInteraction) {
     try {
       await postWebhook(
         await getSecret(secretNames.notificationWebhookUrl),
-        `ASA map start requested by <@${userId ?? "unknown"}>.\nMap: ${definition.name}\nSession: ${sessionName}\nEvent: ${eventModLabel(eventModId)}\nReserved: ${sessionHours}h\nStatus: STARTING`,
+        `ASA map start requested by <@${userId ?? "unknown"}>.\nMap: ${definition.name}\nSession: ${sessionName}\nEvent: ${eventModLabel(eventModId)}\nIdle auto-stop: ${idleTimeoutMinutes}m\nStatus: STARTING`,
       );
     } catch (error) {
       console.error("Failed to post start notification", error);
     }
   }
   return message(
-    `ASA start requested.\nMap: ${definition.name}\nSession: ${sessionName}\nEvent: ${eventModLabel(eventModId)}\nReserved: ${sessionHours}h`,
+    `ASA start requested.\nMap: ${definition.name}\nSession: ${sessionName}\nEvent: ${eventModLabel(eventModId)}\nIdle auto-stop: ${idleTimeoutMinutes}m`,
     true,
   );
 }
@@ -425,7 +426,7 @@ async function readReadyAt(state: MapServerState): Promise<string | undefined> {
 }
 
 function stateLine(state: MapServerState, playerCount?: number, readyAt?: string): string {
-  return `${state.mapId}: ${state.status} | ready ${readyAt ? "yes" : "no"} | players ${playerCount ?? "?"}/${state.maxPlayers} | ${state.connectCommand ?? "no address"}`;
+  return `${state.mapId}: ${state.status} | ready ${readyAt ? "yes" : "no"} | players ${playerCount ?? "?"}/${state.maxPlayers} | idle ${state.idleTimeoutMinutes}m | ${state.connectCommand ?? "no address"}`;
 }
 
 async function handleStatus(interaction: DiscordInteraction) {
@@ -442,7 +443,7 @@ async function handleStatus(interaction: DiscordInteraction) {
         `Ready: ${readyAt ?? "not ready"}`,
         `Players: ${playerCount ?? "unknown"} / ${state.maxPlayers}`,
         `Started: ${state.startedAt ?? "N/A"}`,
-        `Expires: ${state.expiresAt ?? "N/A"}`,
+        `Idle auto-stop: ${state.idleTimeoutMinutes} minutes`,
         `Connect: ${state.connectCommand ?? "not available"}`,
       ].join("\n"),
       true,
@@ -499,18 +500,16 @@ async function handleBackup(interaction: DiscordInteraction) {
 
 async function handleBudget() {
   const now = new Date();
-  const [budget, cluster] = await Promise.all([store.getBudget(monthKey(now)), store.getCluster()]);
-  const runtime = budget?.runtimeSeconds ?? 0;
-  const reserved = budget?.reservedRuntimeSeconds ?? 0;
+  const [{ budget, runtimeSeconds }, cluster] = await Promise.all([currentRuntime(now), store.getCluster()]);
+  const settledRuntime = budget?.runtimeSeconds ?? 0;
   return message(
     [
       `Starts: ${budget?.startCount ?? 0}`,
-      `Settled runtime: ${hours(runtime)}h`,
-      `Reserved runtime: ${hours(reserved)}h`,
-      `Committed: ${hours(committedRuntimeSeconds(budget))}h / ${monthlyRuntimeHoursLimit}h`,
+      `Settled runtime: ${hours(settledRuntime)}h`,
+      `Current runtime: ${hours(runtimeSeconds)}h / ${monthlyRuntimeHoursLimit}h`,
       `Active maps: ${cluster?.activeCount ?? 0} / ${cluster?.maxConcurrentMaps ?? maxConcurrentMaps}`,
       `Estimated cost (conservative): ¥${Math.round(budget?.estimatedCostJpy ?? 0)}`,
-      `Estimated cost (Fargate Spot approx.): ¥${Math.round(spotCostJpy(runtime))}`,
+      `Estimated cost (Fargate Spot approx.): ¥${Math.round(spotCostJpy(runtimeSeconds))}`,
     ].join("\n"),
     true,
   );

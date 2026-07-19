@@ -187,7 +187,7 @@ pnpm run image:push --profile my-aws-profile
 - キャパシティプロバイダ戦略のデフォルトは Fargate Spot。`-c enableOnDemandFallback=true` を指定しない限りオンデマンドへのフォールバックは無効。
 - タスクサイズのデフォルトは 4 vCPU・24 GiB メモリ。
 - Discord の budget 出力は、保守的な見積もり(`hourlyCostJpy`、デフォルト 52 円/時)と Fargate Spot の変動見積もり(`spotHourlyCostJpy`、デフォルト 17 円/時)の両方を表示する。
-- `/asa start` は `session_hours` へ 1〜48 時間(既定 8 時間)を指定し、月間 task-hour 予算を起動 transaction で予約する。`idle_minutes` は 1〜1440 分(既定 30 分)で、時刻の異なる fresh な heartbeat がその時間連続して 0 人を示すと停止する。heartbeat の欠落・鮮度切れ・別 runId だけでは idle stop しない。
+- `/asa start` の `idle_minutes` は 1〜1440 分(既定 30 分)。Map セッションごとに独立した timeout と Map 専用 heartbeat を管理し、そのセッションの時刻が異なる fresh な heartbeat が設定時間連続して 0 人を示した場合だけ停止する。heartbeat の欠落・鮮度切れ・別 runId だけでは idle stop しない。月間 task-hour 上限は確定済み実行時間と全アクティブ Map の実経過時間の合計で判定し、固定のセッション時間は予約しない。
 - ASA と UMU-Proton は `scripts/push-image.sh` の Docker イメージビルド時にインストールされる。CDK の synth / deploy は Docker を起動しない。
 - ASA のアップデートを取り込むには、まず `./scripts/push-image.sh --build-id 2026-07-05` を実行し、次に同じタグで `pnpm exec cdk deploy -c asaBuildId=2026-07-05` をデプロイする。タグが存在しない・一致しない場合、ECS タスクはイメージの pull エラーで停止する。
 - `-c asaUpdateOnStart=true` で、タスク起動のたびに SteamCMD で更新する緊急用モードを有効にできる。デフォルトは無効。

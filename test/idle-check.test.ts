@@ -15,7 +15,6 @@ function state(values: Partial<MapServerState> = {}): MapServerState {
     clusterArn: "cluster",
     startedAt: "2026-07-17T00:00:00.000Z",
     taskStartedAt: "2026-07-17T00:00:00.000Z",
-    expiresAt: "2026-07-17T08:00:00.000Z",
     publicIp: "203.0.113.10",
     connectCommand: "open 203.0.113.10:7777",
     sessionName: "private-asa",
@@ -30,7 +29,6 @@ function state(values: Partial<MapServerState> = {}): MapServerState {
     lastBackupAt: null,
     lastStopReason: null,
     lastEcsEventVersion: 1,
-    reservations: [{ budgetPk: "BUDGET#2026-07", runtimeSeconds: 8 * 3600 }],
     updatedAt: "2026-07-17T00:00:00.000Z",
     ...values,
   };
@@ -47,7 +45,13 @@ function budget(runtimeSeconds: number): BudgetState {
   };
 }
 
-function evaluate(values: { state?: MapServerState; heartbeat?: unknown; budget?: BudgetState; at?: Date }) {
+function evaluate(values: {
+  state?: MapServerState;
+  heartbeat?: unknown;
+  budget?: BudgetState;
+  activeTaskStartedAt?: ReadonlyArray<string | null | undefined>;
+  at?: Date;
+}) {
   const heartbeat =
     values.heartbeat && typeof values.heartbeat === "object"
       ? { mapId: values.state?.mapId ?? "the-island", ...values.heartbeat }
@@ -56,6 +60,7 @@ function evaluate(values: { state?: MapServerState; heartbeat?: unknown; budget?
     state: values.state,
     heartbeat,
     budget: values.budget,
+    activeTaskStartedAt: values.activeTaskStartedAt ?? [values.state?.taskStartedAt ?? values.state?.startedAt],
     now: values.at ?? now,
     monthlyRuntimeHoursLimit: 80,
     heartbeatFreshnessSeconds: 180,
@@ -63,7 +68,7 @@ function evaluate(values: { state?: MapServerState; heartbeat?: unknown; budget?
 }
 
 describe("idle check evaluation", () => {
-  it("stops after distinct zero-player samples span the session timeout", () => {
+  it("stops after distinct zero-player samples span this Map session's idle timeout", () => {
     const decision = evaluate({
       state: state({ idleSince: "2026-07-17T00:00:00.000Z", lastHeartbeatAt: "2026-07-17T00:44:00.000Z" }),
       heartbeat: { playerCount: 0, updatedAt: "2026-07-17T00:45:00.000Z", runId: "run-island-12345678" },
@@ -72,7 +77,7 @@ describe("idle check evaluation", () => {
     expect(decision).toMatchObject({ action: "STOP", reason: "IDLE_TIMEOUT", rule: "RCON_ZERO", idleMinutes: 45 });
   });
 
-  it("uses the configured session timeout, including the minimum", () => {
+  it("uses the configured idle timeout, including the minimum", () => {
     const decision = evaluate({
       state: state({
         idleTimeoutMinutes: 1,
@@ -85,7 +90,7 @@ describe("idle check evaluation", () => {
     expect(decision.reason).toBe("IDLE_TIMEOUT");
   });
 
-  it("uses the configured maximum session timeout", () => {
+  it("uses the configured maximum idle timeout", () => {
     const decision = evaluate({
       state: state({
         startedAt: "2026-07-16T00:00:00.000Z",
@@ -189,6 +194,36 @@ describe("idle check evaluation", () => {
     });
 
     expect(decision).toMatchObject({ action: "STOP", reason: "BUDGET_EXCEEDED", currentMonthRuntimeSeconds: 80 * 3600 });
+  });
+
+  it("evaluates idle time independently for Map sessions with different timeouts", () => {
+    const island = state({ idleTimeoutMinutes: 1, idleSince: "2026-07-17T00:44:00.000Z", lastHeartbeatAt: "2026-07-17T00:44:00.000Z" });
+    const scorched = state({
+      pk: "MAP#scorched-earth",
+      mapId: "scorched-earth",
+      arkMapName: "ScorchedEarth_WP",
+      runId: "run-scorched-12345678",
+      taskArn: "task-2",
+      idleTimeoutMinutes: 30,
+      idleSince: "2026-07-17T00:44:00.000Z",
+      lastHeartbeatAt: "2026-07-17T00:44:00.000Z",
+    });
+    const activeTaskStartedAt = [island.taskStartedAt, scorched.taskStartedAt];
+
+    expect(
+      evaluate({
+        state: island,
+        activeTaskStartedAt,
+        heartbeat: { playerCount: 0, updatedAt: "2026-07-17T00:45:00.000Z", runId: island.runId },
+      }),
+    ).toMatchObject({ action: "STOP", reason: "IDLE_TIMEOUT", idleMinutes: 1 });
+    expect(
+      evaluate({
+        state: scorched,
+        activeTaskStartedAt,
+        heartbeat: { playerCount: 0, updatedAt: "2026-07-17T00:45:00.000Z", runId: scorched.runId },
+      }),
+    ).toMatchObject({ action: "NONE", rule: "RCON_ZERO", idleMinutes: 1 });
   });
 
   it("does not perform idle evaluation while starting", () => {

@@ -8,7 +8,7 @@ import {
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { mapStatePk } from "./resources.js";
-import type { BudgetState, ClusterState, MapServerState, RuntimeReservation, ServerState, ServerStatus, StartOperation } from "./types.js";
+import type { BudgetState, ClusterState, MapServerState, ServerState, ServerStatus, StartOperation } from "./types.js";
 
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -80,40 +80,14 @@ export class StateStore {
     return result.Item as BudgetState | undefined;
   }
 
-  async getBudgets(pks: string[]): Promise<Map<string, BudgetState | undefined>> {
-    if (pks.length === 0) return new Map();
-    const result = await documentClient.send(
-      new BatchGetCommand({ RequestItems: { [this.tableName]: { Keys: pks.map((pk) => ({ pk })) } } }),
-    );
-    const items = (result.Responses?.[this.tableName] ?? []) as BudgetState[];
-    const byPk = new Map(items.map((item) => [item.pk, item]));
-    return new Map(pks.map((pk) => [pk, byPk.get(pk)]));
-  }
-
-  async reserveMapStart(params: {
+  async claimMapStart(params: {
     state: MapServerState;
     operation: StartOperation;
     maxConcurrentMaps: number;
-    monthlyRuntimeSecondsLimit: number;
+    budgetPk: string;
     schemaVersion: number;
   }): Promise<boolean> {
     const now = params.state.updatedAt;
-    const budgetUpdates = params.state.reservations.map((reservation, index) => ({
-      Update: {
-        TableName: this.tableName,
-        Key: { pk: reservation.budgetPk },
-        UpdateExpression:
-          "ADD reservedRuntimeSeconds :seconds, committedRuntimeSeconds :seconds, startCount :start SET runtimeSeconds = if_not_exists(runtimeSeconds, :zero), estimatedCostUsd = if_not_exists(estimatedCostUsd, :zero), estimatedCostJpy = if_not_exists(estimatedCostJpy, :zero), updatedAt = :updatedAt",
-        ConditionExpression: "attribute_not_exists(committedRuntimeSeconds) OR committedRuntimeSeconds <= :remaining",
-        ExpressionAttributeValues: {
-          ":seconds": reservation.runtimeSeconds,
-          ":remaining": params.monthlyRuntimeSecondsLimit - reservation.runtimeSeconds,
-          ":start": index === 0 ? 1 : 0,
-          ":zero": 0,
-          ":updatedAt": now,
-        },
-      },
-    }));
     try {
       await documentClient.send(
         new TransactWriteCommand({
@@ -145,7 +119,15 @@ export class StateStore {
                 },
               },
             },
-            ...budgetUpdates,
+            {
+              Update: {
+                TableName: this.tableName,
+                Key: { pk: params.budgetPk },
+                UpdateExpression:
+                  "SET runtimeSeconds = if_not_exists(runtimeSeconds, :zero), estimatedCostUsd = if_not_exists(estimatedCostUsd, :zero), estimatedCostJpy = if_not_exists(estimatedCostJpy, :zero), updatedAt = :updatedAt ADD startCount :one",
+                ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":updatedAt": now },
+              },
+            },
             {
               Put: {
                 TableName: this.tableName,
@@ -239,7 +221,7 @@ export class StateStore {
     }
   }
 
-  async rollbackMapStart(mapId: string, runId: string, reservations: RuntimeReservation[], reason: string): Promise<boolean> {
+  async rollbackMapStart(mapId: string, runId: string, reason: string): Promise<boolean> {
     const now = new Date().toISOString();
     try {
       await documentClient.send(
@@ -250,7 +232,7 @@ export class StateStore {
                 TableName: this.tableName,
                 Key: { pk: mapStatePk(mapId) },
                 UpdateExpression:
-                  "SET #status = :error, taskArn = :null, runId = :null, taskStartedAt = :null, expiresAt = :null, publicIp = :null, connectCommand = :null, idleSince = :null, lastHeartbeatAt = :null, reservations = :empty, lastStopReason = :reason, #updatedAt = :now",
+                  "SET #status = :error, taskArn = :null, runId = :null, taskStartedAt = :null, publicIp = :null, connectCommand = :null, idleSince = :null, lastHeartbeatAt = :null, lastStopReason = :reason, #updatedAt = :now",
                 ConditionExpression: "runId = :runId AND #status IN (:starting, :running, :stopping)",
                 ExpressionAttributeNames: { "#status": "status", "#updatedAt": "updatedAt" },
                 ExpressionAttributeValues: {
@@ -259,7 +241,6 @@ export class StateStore {
                   ":running": "RUNNING",
                   ":stopping": "STOPPING",
                   ":null": null,
-                  ":empty": [],
                   ":reason": reason,
                   ":now": now,
                   ":runId": runId,
@@ -275,19 +256,6 @@ export class StateStore {
                 ExpressionAttributeValues: { ":minusOne": -1, ":zero": 0, ":now": now },
               },
             },
-            ...reservations.map((reservation) => ({
-              Update: {
-                TableName: this.tableName,
-                Key: { pk: reservation.budgetPk },
-                UpdateExpression: "ADD reservedRuntimeSeconds :negative, committedRuntimeSeconds :negative SET updatedAt = :now",
-                ConditionExpression: "reservedRuntimeSeconds >= :positive AND committedRuntimeSeconds >= :positive",
-                ExpressionAttributeValues: {
-                  ":negative": -reservation.runtimeSeconds,
-                  ":positive": reservation.runtimeSeconds,
-                  ":now": now,
-                },
-              },
-            })),
             {
               Update: {
                 TableName: this.tableName,
@@ -417,16 +385,14 @@ export class StateStore {
     mapId: string;
     runId: string;
     taskArn: string;
-    reservations: RuntimeReservation[];
     budgets: BudgetSettlement[];
     reason: string;
     eventVersion: number;
     lastBackupAt?: string | null;
   }): Promise<boolean> {
     const now = new Date().toISOString();
-    const pks = new Set([...params.reservations.map((value) => value.budgetPk), ...params.budgets.map((value) => value.budgetPk)]);
+    const pks = new Set(params.budgets.map((value) => value.budgetPk));
     if (pks.size > 20) throw new Error("A task settlement cannot span more than 20 budget months.");
-    const reservationByPk = new Map(params.reservations.map((value) => [value.budgetPk, value.runtimeSeconds]));
     const actualByPk = new Map(params.budgets.map((value) => [value.budgetPk, value]));
     try {
       await documentClient.send(
@@ -440,23 +406,17 @@ export class StateStore {
               },
             },
             ...[...pks].map((pk) => {
-              const reserved = reservationByPk.get(pk) ?? 0;
               const actual = actualByPk.get(pk);
-              const actualSeconds = actual?.runtimeSeconds ?? 0;
               return {
                 Update: {
                   TableName: this.tableName,
                   Key: { pk },
                   UpdateExpression:
-                    "ADD runtimeSeconds :actual, reservedRuntimeSeconds :negativeReserved, committedRuntimeSeconds :committedDelta, estimatedCostJpy :costJpy, estimatedCostUsd :costUsd SET updatedAt = :now, startCount = if_not_exists(startCount, :zero)",
-                  ConditionExpression: "attribute_not_exists(reservedRuntimeSeconds) OR reservedRuntimeSeconds >= :reserved",
+                    "SET updatedAt = :now, startCount = if_not_exists(startCount, :zero) ADD runtimeSeconds :actual, estimatedCostJpy :costJpy, estimatedCostUsd :costUsd",
                   ExpressionAttributeValues: {
-                    ":actual": actualSeconds,
-                    ":negativeReserved": -reserved,
-                    ":committedDelta": actualSeconds - reserved,
+                    ":actual": actual?.runtimeSeconds ?? 0,
                     ":costJpy": actual?.estimatedCostJpy ?? 0,
                     ":costUsd": actual?.estimatedCostUsd ?? 0,
-                    ":reserved": reserved,
                     ":zero": 0,
                     ":now": now,
                   },
@@ -468,7 +428,7 @@ export class StateStore {
                 TableName: this.tableName,
                 Key: { pk: mapStatePk(params.mapId) },
                 UpdateExpression:
-                  "SET #status = :stopped, #updatedAt = :now, taskArn = :null, runId = :null, taskStartedAt = :null, expiresAt = :null, publicIp = :null, connectCommand = :null, idleSince = :null, lastHeartbeatAt = :null, reservations = :empty, lastStopReason = :reason, lastEcsEventVersion = :version, lastBackupAt = :lastBackupAt",
+                  "SET #status = :stopped, #updatedAt = :now, taskArn = :null, runId = :null, taskStartedAt = :null, publicIp = :null, connectCommand = :null, idleSince = :null, lastHeartbeatAt = :null, lastStopReason = :reason, lastEcsEventVersion = :version, lastBackupAt = :lastBackupAt",
                 ConditionExpression:
                   "runId = :runId AND taskArn = :taskArn AND (attribute_not_exists(lastEcsEventVersion) OR lastEcsEventVersion = :null OR lastEcsEventVersion < :version)",
                 ExpressionAttributeNames: { "#status": "status", "#updatedAt": "updatedAt" },
@@ -476,7 +436,6 @@ export class StateStore {
                   ":stopped": "STOPPED",
                   ":now": now,
                   ":null": null,
-                  ":empty": [],
                   ":reason": params.reason,
                   ":version": params.eventVersion,
                   ":lastBackupAt": params.lastBackupAt ?? null,

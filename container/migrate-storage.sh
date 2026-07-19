@@ -7,6 +7,7 @@ mode="${1:-}"
 : "${LEGACY_S3_SAVE_KEY:?LEGACY_S3_SAVE_KEY is required}"
 
 cluster_root="${ASA_CLUSTER_DIR:-/asa/cluster}"
+cluster_namespace="${cluster_root%/}/clusters"
 efs_admin_root="${EFS_ADMIN_ROOT:-${cluster_root}}"
 scripts_root="${ASA_SCRIPTS_DIR:-/asa/scripts}"
 tmp_root="${ASA_TMP_ROOT:-/asa/tmp}"
@@ -41,15 +42,16 @@ if ! ASA_CLUSTER_DIR="${efs_admin_root}" timeout "${CLUSTER_PROBE_TIMEOUT_SECOND
   exit 1
 fi
 mkdir -p "${cluster_root}"
-chown "${target_uid}:${target_gid}" "${cluster_root}"
-chmod 0750 "${cluster_root}"
+mkdir -p "${cluster_namespace}"
+chown "${target_uid}:${target_gid}" "${cluster_root}" "${cluster_namespace}"
+chmod 0750 "${cluster_root}" "${cluster_namespace}"
 
 mkdir -p "${tmp_root}"
 work_dir="$(mktemp -d "${tmp_root%/}/storage-migration.XXXXXX")"
 efs_stage=""
 cleanup() {
   rm -rf -- "${work_dir}"
-  if [[ -n "${efs_stage}" && "${efs_stage}" == "${cluster_root}"/.asa-*-stage-* ]]; then
+  if [[ -n "${efs_stage}" && "${efs_stage}" == "${cluster_namespace}"/.asa-*-stage-* ]]; then
     rm -rf -- "${efs_stage}"
   fi
 }
@@ -108,12 +110,12 @@ case "${mode}" in
     aws s3 cp "s3://${S3_BUCKET}/${LEGACY_S3_SAVE_KEY}" "${work_dir}/legacy.tar.zst"
     safe_extract "${work_dir}/legacy.tar.zst" "${work_dir}/legacy"
 
-    cluster_source="${work_dir}/legacy/Saved/clusters/${ASA_CLUSTER_ID}"
+    cluster_source="${work_dir}/legacy/Saved/clusters/clusters/${ASA_CLUSTER_ID}"
     if [[ ! -d "${cluster_source}" ]]; then
-      echo "Legacy archive does not contain Saved/clusters/${ASA_CLUSTER_ID}. Inspect the real archive before changing the split rule." >&2
+      echo "Legacy archive does not contain Saved/clusters/clusters/${ASA_CLUSTER_ID}. Inspect the real archive before changing the split rule." >&2
       exit 1
     fi
-    cluster_destination="${cluster_root}/${ASA_CLUSTER_ID}"
+    cluster_destination="${cluster_namespace}/${ASA_CLUSTER_ID}"
     if [[ -e "${cluster_destination}" && ! -d "${cluster_destination}" ]]; then
       echo "EFS cluster destination is not a directory: ${cluster_destination}" >&2
       exit 1
@@ -144,7 +146,7 @@ case "${mode}" in
       require_new_object "${resource_prefix}maps/${map_id}/saves/current.tar.zst"
     done
 
-    efs_stage="${cluster_root}/.asa-migration-stage-${ASA_CLUSTER_ID}-$$"
+    efs_stage="${cluster_namespace}/.asa-migration-stage-${ASA_CLUSTER_ID}-$$"
     mkdir "${efs_stage}"
     cp -a "${cluster_source}/." "${efs_stage}/"
     chown -R "${target_uid}:${target_gid}" "${efs_stage}"
@@ -169,7 +171,7 @@ case "${mode}" in
 
     if [[ -d "${cluster_destination}" ]]; then
       if [[ -n "$(find "${cluster_destination}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-        preserved="${cluster_root}/.pre-migration-${ASA_CLUSTER_ID}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+        preserved="${cluster_namespace}/.pre-migration-${ASA_CLUSTER_ID}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
         mv "${cluster_destination}" "${preserved}"
         echo "Preserved the previous cluster directory at ${preserved}."
       else
@@ -198,7 +200,7 @@ case "${mode}" in
     rollback_source_key="${resource_prefix}maps/${ROLLBACK_MAP_ID}/saves/current.tar.zst"
     rollback_output_key="${ROLLBACK_S3_SAVE_KEY:-${LEGACY_S3_SAVE_KEY}}"
     require_new_object "${rollback_output_key}"
-    cluster_source="${cluster_root}/${ASA_CLUSTER_ID}"
+    cluster_source="${cluster_namespace}/${ASA_CLUSTER_ID}"
     if [[ ! -d "${cluster_source}" ]]; then
       echo "EFS cluster directory does not exist: ${cluster_source}" >&2
       exit 1
@@ -206,8 +208,8 @@ case "${mode}" in
     aws s3 cp "s3://${S3_BUCKET}/${rollback_source_key}" "${work_dir}/map-save.tar.zst"
     safe_extract "${work_dir}/map-save.tar.zst" "${work_dir}/rollback"
     rm -rf -- "${work_dir}/rollback/Saved/clusters"
-    mkdir -p "${work_dir}/rollback/Saved/clusters/${ASA_CLUSTER_ID}"
-    cp -a "${cluster_source}/." "${work_dir}/rollback/Saved/clusters/${ASA_CLUSTER_ID}/"
+    mkdir -p "${work_dir}/rollback/Saved/clusters/clusters/${ASA_CLUSTER_ID}"
+    cp -a "${cluster_source}/." "${work_dir}/rollback/Saved/clusters/clusters/${ASA_CLUSTER_ID}/"
     tar --zstd -cf "${work_dir}/legacy-export.tar.zst" -C "${work_dir}/rollback" Saved
     aws s3 cp "${work_dir}/legacy-export.tar.zst" "s3://${S3_BUCKET}/${rollback_output_key}"
     echo "Legacy rollback archive exported to s3://${S3_BUCKET}/${rollback_output_key}."
@@ -215,13 +217,13 @@ case "${mode}" in
 
   restore-cluster)
     : "${RESTORED_CLUSTER_PATH:?RESTORED_CLUSTER_PATH is required}"
-    restored_parent="${RESTORED_CLUSTER_PATH%/cluster-data/${ASA_CLUSTER_ID}}"
+    restored_parent="${RESTORED_CLUSTER_PATH%/cluster-data/clusters/${ASA_CLUSTER_ID}}"
     if [[ "${restored_parent}" == "${RESTORED_CLUSTER_PATH}" || ! "${restored_parent}" =~ ^aws-backup-restore_[A-Za-z0-9_.:-]+$ ]]; then
-      echo "RESTORED_CLUSTER_PATH must identify aws-backup-restore_*/cluster-data/${ASA_CLUSTER_ID}." >&2
+      echo "RESTORED_CLUSTER_PATH must identify aws-backup-restore_*/cluster-data/clusters/${ASA_CLUSTER_ID}." >&2
       exit 2
     fi
     restore_source="${efs_admin_root}/${RESTORED_CLUSTER_PATH}"
-    cluster_destination="${cluster_root}/${ASA_CLUSTER_ID}"
+    cluster_destination="${cluster_namespace}/${ASA_CLUSTER_ID}"
     if [[ ! -d "${restore_source}" ]]; then
       echo "Restored cluster directory does not exist: ${restore_source}" >&2
       exit 1
@@ -236,14 +238,14 @@ case "${mode}" in
         exit 1
       fi
     fi
-    efs_stage="${cluster_root}/.asa-restore-stage-${ASA_CLUSTER_ID}-$$"
+    efs_stage="${cluster_namespace}/.asa-restore-stage-${ASA_CLUSTER_ID}-$$"
     mkdir "${efs_stage}"
     cp -a "${restore_source}/." "${efs_stage}/"
     chown -R "${target_uid}:${target_gid}" "${efs_stage}"
     chmod 0750 "${efs_stage}"
     if [[ -d "${cluster_destination}" ]]; then
       if [[ -n "$(find "${cluster_destination}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-        preserved="${cluster_root}/.pre-restore-${ASA_CLUSTER_ID}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+        preserved="${cluster_namespace}/.pre-restore-${ASA_CLUSTER_ID}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
         mv "${cluster_destination}" "${preserved}"
         echo "Preserved the previous cluster directory at ${preserved}."
       else

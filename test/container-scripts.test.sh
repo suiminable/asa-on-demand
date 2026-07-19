@@ -36,11 +36,11 @@ export FAKE_S3_ROOT="${fake_s3}"
 legacy_root="${work_root}/legacy"
 mkdir -p \
   "${legacy_root}/Saved/SavedArks" \
-  "${legacy_root}/Saved/clusters/${cluster_id}" \
+  "${legacy_root}/Saved/clusters/clusters/${cluster_id}" \
   "${legacy_root}/Saved/Config/WindowsServer" \
   "${fake_s3}/${bucket}/${prefix}config"
 printf 'legacy-island-world\n' >"${legacy_root}/Saved/SavedArks/TheIsland_WP.ark"
-printf 'survivor-v1\n' >"${legacy_root}/Saved/clusters/${cluster_id}/survivor.arkprofile"
+printf 'survivor-v1\n' >"${legacy_root}/Saved/clusters/clusters/${cluster_id}/survivor.arkprofile"
 printf '[ServerSettings]\nServerAdminPassword=legacy-secret\n' \
   >"${legacy_root}/Saved/Config/WindowsServer/GameUserSettings.ini"
 tar --zstd -cf "${fake_s3}/${bucket}/${prefix}saves/current.tar.zst" -C "${legacy_root}" Saved
@@ -66,11 +66,11 @@ env "${migration_env[@]}" bash "${repo_root}/container/migrate-storage.sh" migra
 
 [[ "$(sha256sum "${fake_s3}/${bucket}/${prefix}saves/current.tar.zst" | cut -d' ' -f1)" == "${legacy_checksum}" ]] \
   || fail "legacy archive was modified"
-assert_file_content "${cluster_root}/${cluster_id}/survivor.arkprofile" "survivor-v1"
-[[ "$(stat -c '%u:%g' "${cluster_root}/${cluster_id}")" == "10001:10001" ]] \
+assert_file_content "${cluster_root}/clusters/${cluster_id}/survivor.arkprofile" "survivor-v1"
+[[ "$(stat -c '%u:%g' "${cluster_root}/clusters/${cluster_id}")" == "10001:10001" ]] \
   || fail "migrated cluster directory is not owned by the runtime UID/GID"
-setpriv --reuid=10001 --regid=10001 --clear-groups touch "${cluster_root}/${cluster_id}/.uid-write-probe"
-rm -f "${cluster_root}/${cluster_id}/.uid-write-probe"
+setpriv --reuid=10001 --regid=10001 --clear-groups touch "${cluster_root}/clusters/${cluster_id}/.uid-write-probe"
+rm -f "${cluster_root}/clusters/${cluster_id}/.uid-write-probe"
 
 for map_id in the-island scorched-earth; do
   archive="${fake_s3}/${bucket}/${prefix}maps/${map_id}/saves/current.tar.zst"
@@ -96,10 +96,10 @@ if env "${migration_env[@]}" bash "${repo_root}/container/migrate-storage.sh" mi
   fail "migration overwrote an existing destination without explicit approval"
 fi
 env "${migration_env[@]}" MIGRATION_ALLOW_OVERWRITE=true bash "${repo_root}/container/migrate-storage.sh" migrate-parallel
-pre_migration="$(find "${cluster_root}" -maxdepth 1 -type d -name ".pre-migration-${cluster_id}-*" -print -quit)"
+pre_migration="$(find "${cluster_root}/clusters" -maxdepth 1 -type d -name ".pre-migration-${cluster_id}-*" -print -quit)"
 [[ -n "${pre_migration}" ]] || fail "approved migration retry did not preserve the previous cluster directory"
 assert_file_content "${pre_migration}/survivor.arkprofile" "survivor-v1"
-[[ "$(stat -c '%u:%g' "${cluster_root}/${cluster_id}")" == "10001:10001" ]] \
+[[ "$(stat -c '%u:%g' "${cluster_root}/clusters/${cluster_id}")" == "10001:10001" ]] \
   || fail "retried migration changed the runtime UID/GID"
 
 mkdir -p "${fake_s3}/${bucket}/${prefix}config/maps/the-island"
@@ -123,8 +123,8 @@ env \
 [[ ! -e "${restore_install}/ShooterGame/Saved/clusters" ]] || fail "restore reintroduced local cluster data"
 
 new_world_install="${work_root}/new-world-install"
-mkdir -p "${new_world_install}/ShooterGame/Saved/clusters/${cluster_id}"
-printf 'image-local-cluster-data\n' >"${new_world_install}/ShooterGame/Saved/clusters/${cluster_id}/unsafe.dat"
+mkdir -p "${new_world_install}/ShooterGame/Saved/clusters/clusters/${cluster_id}"
+printf 'image-local-cluster-data\n' >"${new_world_install}/ShooterGame/Saved/clusters/clusters/${cluster_id}/unsafe.dat"
 env \
   S3_BUCKET="${bucket}" \
   S3_SAVE_KEY="${prefix}maps/new-world/saves/current.tar.zst" \
@@ -175,10 +175,10 @@ backup_map() {
   local install_root="${work_root}/backup-${map_id}"
   mkdir -p \
     "${install_root}/ShooterGame/Saved/SavedArks" \
-    "${install_root}/ShooterGame/Saved/clusters/${cluster_id}" \
+    "${install_root}/ShooterGame/Saved/clusters/clusters/${cluster_id}" \
     "${install_root}/ShooterGame/Saved/Config/WindowsServer"
   printf '%s\n' "${world_value}" >"${install_root}/ShooterGame/Saved/SavedArks/world.ark"
-  printf 'must-not-be-archived\n' >"${install_root}/ShooterGame/Saved/clusters/${cluster_id}/transfer.dat"
+  printf 'must-not-be-archived\n' >"${install_root}/ShooterGame/Saved/clusters/clusters/${cluster_id}/transfer.dat"
   printf '[ServerSettings]\nServerAdminPassword=must-not-be-archived\n' \
     >"${install_root}/ShooterGame/Saved/Config/WindowsServer/GameUserSettings.ini"
   printf '[/Script/ShooterGame.ShooterGameMode]\n' >"${install_root}/ShooterGame/Saved/Config/WindowsServer/Game.ini"
@@ -230,9 +230,9 @@ rollback_extract="${work_root}/rollback-extract"
 mkdir -p "${rollback_extract}"
 tar --zstd -xf "${rollback_archive}" -C "${rollback_extract}"
 assert_file_content "${rollback_extract}/Saved/SavedArks/world.ark" "island-after-migration"
-assert_file_content "${rollback_extract}/Saved/clusters/${cluster_id}/survivor.arkprofile" "survivor-v1"
+assert_file_content "${rollback_extract}/Saved/clusters/clusters/${cluster_id}/survivor.arkprofile" "survivor-v1"
 
-restored_relative="aws-backup-restore_20260719T000000Z/cluster-data/${cluster_id}"
+restored_relative="aws-backup-restore_20260719T000000Z/cluster-data/clusters/${cluster_id}"
 mkdir -p "${efs_admin_root}/${restored_relative}"
 printf 'survivor-recovered\n' >"${efs_admin_root}/${restored_relative}/survivor.arkprofile"
 restore_env=(
@@ -243,10 +243,10 @@ if env "${restore_env[@]}" bash "${repo_root}/container/migrate-storage.sh" rest
   fail "restore replaced live cluster data without explicit approval"
 fi
 env "${restore_env[@]}" MIGRATION_ALLOW_OVERWRITE=true bash "${repo_root}/container/migrate-storage.sh" restore-cluster
-assert_file_content "${cluster_root}/${cluster_id}/survivor.arkprofile" "survivor-recovered"
-[[ "$(stat -c '%u:%g' "${cluster_root}/${cluster_id}")" == "10001:10001" ]] \
+assert_file_content "${cluster_root}/clusters/${cluster_id}/survivor.arkprofile" "survivor-recovered"
+[[ "$(stat -c '%u:%g' "${cluster_root}/clusters/${cluster_id}")" == "10001:10001" ]] \
   || fail "restored cluster directory is not owned by the runtime UID/GID"
-preserved="$(find "${cluster_root}" -maxdepth 1 -type d -name ".pre-restore-${cluster_id}-*" -print -quit)"
+preserved="$(find "${cluster_root}/clusters" -maxdepth 1 -type d -name ".pre-restore-${cluster_id}-*" -print -quit)"
 [[ -n "${preserved}" ]] || fail "restore did not preserve the previous live cluster directory"
 assert_file_content "${preserved}/survivor.arkprofile" "survivor-v1"
 
@@ -313,6 +313,9 @@ grep -Fq '"name":"ASA_OPERATION_MODE","value":"migrate-parallel"' "${wrapper_log
 grep -Fq '"name":"MIGRATION_MAP_IDS","value":"the-island,scorched-earth"' "${wrapper_log}" \
   || fail "migration wrapper did not pass the Map set"
 grep -Fq 'dynamodb update-item' "${wrapper_log}" || fail "migration wrapper did not initialize schema v2"
+if grep -Fq 'dynamodb scan' "${wrapper_log}"; then
+  fail "migration wrapper still initializes removed budget reservation fields"
+fi
 unset FAKE_AWS_LOG
 
 echo "Container storage and migration script assertions passed."

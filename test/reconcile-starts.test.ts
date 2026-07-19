@@ -61,7 +61,6 @@ const operation = {
   runId: "run-island-12345678",
   mapId: "the-island",
   phase: "CLAIMED",
-  reservations: [{ budgetPk: "BUDGET#2026-07", runtimeSeconds: 3600 }],
   updatedAt: "2026-07-19T00:00:00.000Z",
   ttl: 1,
 } as const;
@@ -75,7 +74,6 @@ beforeEach(() => {
     mapId: "the-island",
     runId: operation.runId,
     status: "STARTING",
-    reservations: operation.reservations,
   });
   mocks.attachStartedTask.mockReset().mockResolvedValue(true);
   mocks.rollbackMapStart.mockReset().mockResolvedValue(true);
@@ -83,17 +81,12 @@ beforeEach(() => {
 });
 
 describe("stale start reconciliation", () => {
-  it("rolls back the exact reservation when ECS has no matching task", async () => {
+  it("rolls back the exact start claim when ECS has no matching task", async () => {
     mocks.ecsSend.mockResolvedValue({ taskArns: [] });
 
     await handler();
 
-    expect(mocks.rollbackMapStart).toHaveBeenCalledWith(
-      "the-island",
-      "run-island-12345678",
-      operation.reservations,
-      "STALE_START_RECONCILED",
-    );
+    expect(mocks.rollbackMapStart).toHaveBeenCalledWith("the-island", "run-island-12345678", "STALE_START_RECONCILED");
     expect(mocks.attachStartedTask).not.toHaveBeenCalled();
   });
 
@@ -103,18 +96,12 @@ describe("stale start reconciliation", () => {
       mapId: "the-island",
       runId: operation.runId,
       status: "RUNNING",
-      reservations: operation.reservations,
     });
     mocks.ecsSend.mockResolvedValue({ taskArns: [] });
 
     await handler();
 
-    expect(mocks.rollbackMapStart).toHaveBeenCalledWith(
-      "the-island",
-      "run-island-12345678",
-      operation.reservations,
-      "STALE_START_RECONCILED",
-    );
+    expect(mocks.rollbackMapStart).toHaveBeenCalledWith("the-island", "run-island-12345678", "STALE_START_RECONCILED");
   });
 
   it("describes the attached task before relying on eventually consistent task listings", async () => {
@@ -124,7 +111,6 @@ describe("stale start reconciliation", () => {
       runId: operation.runId,
       status: "RUNNING",
       taskArn: "task-known",
-      reservations: operation.reservations,
     });
     mocks.ecsSend.mockResolvedValue({
       tasks: [{ taskArn: "task-known", group: "asa-map:the-island:run-island-12345678", lastStatus: "RUNNING" }],
@@ -137,14 +123,13 @@ describe("stale start reconciliation", () => {
     expect(mocks.rollbackMapStart).not.toHaveBeenCalled();
   });
 
-  it("keeps a post-launch failure reserved while its task is still stopping", async () => {
+  it("keeps a post-launch failure tracked while its task is still stopping", async () => {
     mocks.getMap.mockResolvedValue({
       pk: "MAP#the-island",
       mapId: "the-island",
       runId: operation.runId,
       status: "STOPPING",
       taskArn: "task-known",
-      reservations: operation.reservations,
     });
     mocks.ecsSend.mockResolvedValue({
       tasks: [{ taskArn: "task-known", group: "asa-map:the-island:run-island-12345678", lastStatus: "STOPPING" }],
@@ -163,7 +148,6 @@ describe("stale start reconciliation", () => {
       runId: operation.runId,
       status: "STOPPING",
       taskArn: "task-known",
-      reservations: operation.reservations,
     });
     mocks.ecsSend.mockResolvedValue({
       tasks: [{ taskArn: "task-known", group: "asa-map:the-island:run-island-12345678", lastStatus: "STOPPED" }],
@@ -171,12 +155,7 @@ describe("stale start reconciliation", () => {
 
     await handler();
 
-    expect(mocks.rollbackMapStart).toHaveBeenCalledWith(
-      "the-island",
-      "run-island-12345678",
-      operation.reservations,
-      "STALE_STOPPING_START_RECONCILED",
-    );
+    expect(mocks.rollbackMapStart).toHaveBeenCalledWith("the-island", "run-island-12345678", "STALE_STOPPING_START_RECONCILED");
   });
 
   it("reattaches a matching ECS task and recreates its map-scoped schedule", async () => {

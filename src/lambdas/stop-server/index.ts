@@ -6,12 +6,12 @@ import { getSecret, intEnv, requireEnv } from "../../shared/config.js";
 import { HEARTBEAT_FRESHNESS_SECONDS } from "../../shared/defaults.js";
 import { postWebhook } from "../../shared/discord.js";
 import { evaluateIdleCheck } from "../../shared/idle-check.js";
-import { mapById } from "../../shared/maps.js";
+import { ASA_MAPS, mapById } from "../../shared/maps.js";
 import { mapStorageKeys, stopScheduleName } from "../../shared/resources.js";
 import { StateStore } from "../../shared/state.js";
 import type { MapServerState } from "../../shared/types.js";
 
-type StopReason = "USER_REQUEST" | "IDLE_TIMEOUT" | "BUDGET_EXCEEDED" | "SESSION_EXPIRED";
+type StopReason = "USER_REQUEST" | "IDLE_TIMEOUT" | "BUDGET_EXCEEDED";
 
 interface StopInput {
   source: "IDLE_CHECK" | "MANUAL";
@@ -94,8 +94,16 @@ export async function handler(event: StopInput): Promise<{ stopped: boolean; rea
   if (event.source !== "IDLE_CHECK") return stopMap(state, event.reason ?? "USER_REQUEST");
 
   const now = new Date();
-  const budget = await store.getBudget(monthKey(now));
-  const evaluation = { state, budget, now, monthlyRuntimeHoursLimit, heartbeatFreshnessSeconds };
+  const [budget, mapStates] = await Promise.all([
+    store.getBudget(monthKey(now)),
+    store.getMaps(ASA_MAPS.map((definition) => definition.mapId)),
+  ]);
+  const byMapId = new Map(mapStates.map((mapState) => [mapState.mapId, mapState]));
+  byMapId.set(state.mapId, state);
+  const activeTaskStartedAt = [...byMapId.values()]
+    .filter((mapState) => mapState.status === "STARTING" || mapState.status === "RUNNING" || mapState.status === "STOPPING")
+    .map((mapState) => mapState.taskStartedAt ?? mapState.startedAt);
+  const evaluation = { state, budget, activeTaskStartedAt, now, monthlyRuntimeHoursLimit, heartbeatFreshnessSeconds };
   let decision = evaluateIdleCheck({ ...evaluation, heartbeat: undefined });
   if (state.status === "RUNNING" && decision.rule === "HEARTBEAT_INVALID") {
     decision = evaluateIdleCheck({ ...evaluation, heartbeat: await readHeartbeat(state) });
@@ -110,7 +118,6 @@ export async function handler(event: StopInput): Promise<{ stopped: boolean; rea
       playerCount: decision.playerCount,
       idleMinutes: decision.idleMinutes,
       idleTimeoutMinutes: state.idleTimeoutMinutes,
-      expiresAt: state.expiresAt,
       rule: decision.rule,
       action: decision.action,
     }),
@@ -123,8 +130,6 @@ export async function handler(event: StopInput): Promise<{ stopped: boolean; rea
   const detail =
     decision.reason === "IDLE_TIMEOUT"
       ? `Idle: ${decision.idleMinutes?.toFixed(1) ?? "unknown"}m / ${state.idleTimeoutMinutes}m`
-      : decision.reason === "SESSION_EXPIRED"
-        ? `Session expiry: ${state.expiresAt}`
-        : `This month: ${hours(decision.currentMonthRuntimeSeconds)}h / ${monthlyRuntimeHoursLimit}h`;
+      : `This month: ${hours(decision.currentMonthRuntimeSeconds)}h / ${monthlyRuntimeHoursLimit}h`;
   return stopMap(state, decision.reason, detail);
 }

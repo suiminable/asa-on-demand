@@ -27,7 +27,6 @@ import { StateStore } from "../src/shared/state.js";
 function startParams(mapId: "the-island" | "scorched-earth", runId = `run-${mapId}-12345678`) {
   const now = "2026-07-19T00:00:00.000Z";
   const arkMapName = mapId === "the-island" ? "TheIsland_WP" : "ScorchedEarth_WP";
-  const reservations = [{ budgetPk: "BUDGET#2026-07", runtimeSeconds: 28_800 }];
   return {
     state: {
       pk: `MAP#${mapId}` as const,
@@ -39,7 +38,6 @@ function startParams(mapId: "the-island" | "scorched-earth", runId = `run-${mapI
       clusterArn: "cluster",
       startedAt: now,
       taskStartedAt: null,
-      expiresAt: "2026-07-19T08:00:00.000Z",
       publicIp: null,
       connectCommand: null,
       sessionName: `private-asa-${mapId}`,
@@ -54,7 +52,6 @@ function startParams(mapId: "the-island" | "scorched-earth", runId = `run-${mapI
       lastBackupAt: null,
       lastStopReason: null,
       lastEcsEventVersion: null,
-      reservations,
       updatedAt: now,
     },
     operation: {
@@ -63,13 +60,12 @@ function startParams(mapId: "the-island" | "scorched-earth", runId = `run-${mapI
       mapId,
       phase: "CLAIMED" as const,
       taskArn: null,
-      reservations,
       createdAt: now,
       updatedAt: now,
       ttl: 1,
     },
     maxConcurrentMaps: 2,
-    monthlyRuntimeSecondsLimit: 80 * 3600,
+    budgetPk: "BUDGET#2026-07",
     schemaVersion: 2,
   };
 }
@@ -96,9 +92,9 @@ describe("StateStore", () => {
     expect(mocks.send.mock.calls[2][0].input.ExpressionAttributeValues[":phase"]).toBe("TASK_STARTED");
   });
 
-  it("claims a map, cluster slot, budget reservation, and operation atomically", async () => {
+  it("claims a map, cluster slot, start counter, and operation atomically", async () => {
     const store = new StateStore("table");
-    await expect(store.reserveMapStart(startParams("the-island", "run-island-12345678"))).resolves.toBe(true);
+    await expect(store.claimMapStart(startParams("the-island", "run-island-12345678"))).resolves.toBe(true);
     const command = mocks.send.mock.calls[0][0] as { input: { TransactItems: Array<Record<string, unknown>> } };
     expect(command.input.TransactItems).toHaveLength(4);
     expect(command.input.TransactItems[0]).toMatchObject({
@@ -116,7 +112,7 @@ describe("StateStore", () => {
     expect(command.input.TransactItems[2]).toMatchObject({
       Update: {
         Key: { pk: "BUDGET#2026-07" },
-        UpdateExpression: expect.stringContaining("reservedRuntimeSeconds"),
+        UpdateExpression: expect.stringContaining("startCount"),
       },
     });
     expect(command.input.TransactItems[3]).toMatchObject({ Put: { Item: { pk: "OPERATION#run-island-12345678" } } });
@@ -124,8 +120,8 @@ describe("StateStore", () => {
 
   it("uses independent Map keys while sharing the same conditional cluster limit", async () => {
     const store = new StateStore("table");
-    await store.reserveMapStart(startParams("the-island"));
-    await store.reserveMapStart(startParams("scorched-earth"));
+    await store.claimMapStart(startParams("the-island"));
+    await store.claimMapStart(startParams("scorched-earth"));
     const commands = mocks.send.mock.calls.map(([command]) => command.input.TransactItems);
     expect(commands[0][0].Put.Item.pk).toBe("MAP#the-island");
     expect(commands[1][0].Put.Item.pk).toBe("MAP#scorched-earth");
@@ -133,10 +129,10 @@ describe("StateStore", () => {
     expect(commands[1][1].Update.Key).toEqual({ pk: "CLUSTER" });
   });
 
-  it("reports a raced duplicate, concurrency limit, or budget condition as a rejected reservation", async () => {
+  it("reports a raced duplicate or concurrency limit as a rejected claim", async () => {
     mocks.send.mockRejectedValueOnce({ name: "TransactionCanceledException" });
     const store = new StateStore("table");
-    await expect(store.reserveMapStart(startParams("the-island"))).resolves.toBe(false);
+    await expect(store.claimMapStart(startParams("the-island"))).resolves.toBe(false);
   });
 
   it("reattaches early ECS events to STARTING or RUNNING only for the same generation", async () => {
@@ -152,18 +148,11 @@ describe("StateStore", () => {
     expect(command.input.TransactItems[1]).toMatchObject({ Update: { Key: { pk: "OPERATION#run-island-12345678" } } });
   });
 
-  it("rolls back the Map, cluster slot, budget reservation, and operation atomically", async () => {
+  it("rolls back the Map, cluster slot, and operation atomically", async () => {
     const store = new StateStore("table");
-    await expect(
-      store.rollbackMapStart(
-        "the-island",
-        "run-island-12345678",
-        [{ budgetPk: "BUDGET#2026-07", runtimeSeconds: 28_800 }],
-        "RUN_TASK_FAILED",
-      ),
-    ).resolves.toBe(true);
+    await expect(store.rollbackMapStart("the-island", "run-island-12345678", "RUN_TASK_FAILED")).resolves.toBe(true);
     const command = mocks.send.mock.calls[0][0] as { input: { TransactItems: Array<Record<string, unknown>> } };
-    expect(command.input.TransactItems).toHaveLength(4);
+    expect(command.input.TransactItems).toHaveLength(3);
     expect(command.input.TransactItems[0]).toMatchObject({
       Update: {
         Key: { pk: "MAP#the-island" },
@@ -171,21 +160,16 @@ describe("StateStore", () => {
       },
     });
     expect(command.input.TransactItems[1]).toMatchObject({ Update: { Key: { pk: "CLUSTER" } } });
-    expect(command.input.TransactItems[2]).toMatchObject({ Update: { Key: { pk: "BUDGET#2026-07" } } });
-    expect(command.input.TransactItems[3]).toMatchObject({ Update: { Key: { pk: "OPERATION#run-island-12345678" } } });
+    expect(command.input.TransactItems[2]).toMatchObject({ Update: { Key: { pk: "OPERATION#run-island-12345678" } } });
   });
 
-  it("settles a Map task, reservations, cluster count, and operation atomically", async () => {
+  it("settles actual Map task runtime, cluster count, and operation atomically", async () => {
     const store = new StateStore("table");
     await expect(
       store.settleStoppedMapTask({
         mapId: "the-island",
         runId: "run-island-12345678",
         taskArn: "task-1",
-        reservations: [
-          { budgetPk: "BUDGET#2026-07", runtimeSeconds: 7200 },
-          { budgetPk: "BUDGET#2026-08", runtimeSeconds: 7200 },
-        ],
         budgets: [
           { budgetPk: "BUDGET#2026-07", runtimeSeconds: 3600, estimatedCostJpy: 52, estimatedCostUsd: 52 / 150 },
           { budgetPk: "BUDGET#2026-08", runtimeSeconds: 7200, estimatedCostJpy: 104, estimatedCostUsd: 104 / 150 },
@@ -221,7 +205,6 @@ describe("StateStore", () => {
         mapId: "the-island",
         runId: "run-island-12345678",
         taskArn: "task-1",
-        reservations: [],
         budgets: [],
         reason: "USER_REQUEST",
         eventVersion: 9,

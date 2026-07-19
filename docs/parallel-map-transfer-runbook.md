@@ -50,7 +50,7 @@ Before migration, verify the CDK outputs include `AsaClusterFileSystemId`, `AsaC
 2. Run a final legacy backup.
 3. Record the exact `asaClusterId`.
 4. Create a DynamoDB on-demand backup and preserve the current S3 object version for `<resourcePrefix>/saves/current.tar.zst`.
-5. List the archive and confirm it contains `Saved/clusters/<asaClusterId>/`.
+5. List the archive and confirm it contains `Saved/clusters/clusters/<asaClusterId>/`.
 
 Example archive inspection:
 
@@ -59,7 +59,7 @@ aws s3 cp s3://BUCKET/PREFIX/saves/current.tar.zst /tmp/asa-legacy-current.tar.z
 tar --zstd -tf /tmp/asa-legacy-current.tar.zst | less
 ```
 
-If the real archive does not use `Saved/clusters/<asaClusterId>`, stop. The one-shot task intentionally refuses to guess a different split rule.
+If the real archive does not use `Saved/clusters/clusters/<asaClusterId>`, stop. The one-shot task intentionally refuses to guess a different split rule. ASA creates the inner `clusters/<clusterId>` namespace below `-ClusterDirOverride`.
 
 ## 3. Run the one-shot migration
 
@@ -79,7 +79,7 @@ The migration task:
 
 - validates archive paths before extraction;
 - rejects archive links/devices and stages EFS copies before promotion;
-- copies `Saved/clusters/<clusterId>` to EFS `/cluster-data/<clusterId>`;
+- copies `Saved/clusters/clusters/<clusterId>` to EFS `/cluster-data/clusters/<clusterId>`;
 - removes `Saved/clusters` from the Map archive;
 - removes generated `GameUserSettings.ini`/`Game.ini` from Map archives so injected passwords are not copied into the new save keys;
 - creates `maps/<mapId>/saves/current.tar.zst` for each requested Map;
@@ -87,7 +87,7 @@ The migration task:
 - writes `migration/parallel-storage-v2.json` only after the copies complete;
 - leaves the legacy archive untouched;
 - verifies the marker and every requested Map archive from the wrapper;
-- initializes legacy budget counters and the DynamoDB `CLUSTER` schema.
+- initializes the DynamoDB `CLUSTER` schema.
 
 `--allow-overwrite` is a recovery switch, not a normal retry option. Inspect partial S3/EFS results and take another backup before using it. An approved retry preserves the former live directory as `.pre-migration-*`, promotes a fully copied UID/GID 10001 staging directory, and leaves the preserved copy in place for manual cleanup after acceptance.
 
@@ -108,7 +108,7 @@ While all Map tasks are stopped, export one selected Map plus the current EFS cl
   --rollback-key PREFIX/rollback-rehearsal/current.tar.zst
 ```
 
-Download the result and verify that both the Map save and `Saved/clusters/<clusterId>` exist. A production rollback additionally requires redeploying the old task/Lambda code and recreating its stopped `SERVER` row from the DynamoDB backup; do not enable parallelism until that procedure has been rehearsed.
+Download the result and verify that both the Map save and `Saved/clusters/clusters/<clusterId>` exist. A production rollback additionally requires redeploying the old task/Lambda code and recreating its stopped `SERVER` row from the DynamoDB backup; do not enable parallelism until that procedure has been rehearsed.
 
 ## 5. EFS backup and restore rehearsal
 
@@ -116,7 +116,7 @@ The stack creates an encrypted retained Regional EFS, a retained backup vault, h
 
 Before an ASA build update or production migration, start an on-demand AWS Backup job for the `AsaClusterFileSystemId`. Record a recovery point made while all Maps are stopped as `known-good`.
 
-For an item-level restore, restore the case-sensitive path `/cluster-data/<clusterId>` to the existing file system. AWS Backup places restored content under a new `aws-backup-restore_<timestamp>` recovery directory instead of overwriting the source. After the restore job succeeds and while all Maps remain stopped, promote it with:
+For an item-level restore, restore the case-sensitive path `/cluster-data/clusters/<clusterId>` to the existing file system. AWS Backup places restored content under a new `aws-backup-restore_<timestamp>` recovery directory instead of overwriting the source. After the restore job succeeds and while all Maps remain stopped, promote it with:
 
 ```bash
 ./scripts/run-storage-migration.sh \
@@ -125,7 +125,7 @@ For an item-level restore, restore the case-sensitive path `/cluster-data/<clust
   --stack-name STACK_NAME \
   --mode restore-cluster \
   --cluster-id EXISTING_CLUSTER_ID \
-  --restored-cluster-path aws-backup-restore_TIMESTAMP/cluster-data/EXISTING_CLUSTER_ID \
+  --restored-cluster-path aws-backup-restore_TIMESTAMP/cluster-data/clusters/EXISTING_CLUSTER_ID \
   --allow-overwrite
 ```
 

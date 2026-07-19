@@ -189,6 +189,19 @@ describe("AsaFargateStack", () => {
     expect(() => synthTemplate({ maxConcurrentMaps: 0 })).toThrow("maxConcurrentMaps must be an integer from 1 to 10");
   });
 
+  it("allows task tags only while the Discord Lambda creates a task", () => {
+    const template = synthTemplate({ resourcePrefix: "suiminable" });
+    const statements = Object.values(template.findResources("AWS::IAM::Policy")).flatMap(
+      (policy) => policy.Properties.PolicyDocument.Statement,
+    );
+    const tagStatements = statements.filter((statement) => statement.Action === "ecs:TagResource");
+
+    expect(tagStatements).toHaveLength(1);
+    expect(tagStatements[0].Condition).toEqual({ StringEquals: { "ecs:CreateAction": "RunTask" } });
+    expect(JSON.stringify(tagStatements[0].Resource)).toContain(":task/");
+    expect(JSON.stringify(tagStatements[0].Resource)).toContain("/*");
+  });
+
   it("requires a complete Map DNS configuration", () => {
     expect(() => synthTemplate({ domainName: "asa.example.test" })).toThrow(
       "Contexts hostedZoneId and domainName must be configured together.",

@@ -233,6 +233,20 @@ export function createAsaControlPlane(stack: cdk.Stack, props: AsaControlPlanePr
       conditions: { ArnEquals: { "ecs:cluster": props.cluster.clusterArn } },
     }),
   );
+  discordInteractions.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ["ecs:TagResource"],
+      resources: [
+        stack.formatArn({
+          service: "ecs",
+          resource: "task",
+          resourceName: `${props.cluster.clusterName}/*`,
+          arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
+        }),
+      ],
+      conditions: { StringEquals: { "ecs:CreateAction": "RunTask" } },
+    }),
+  );
   reconcileStarts.addToRolePolicy(
     new iam.PolicyStatement({
       actions: ["ecs:ListTasks", "ecs:DescribeTasks"],

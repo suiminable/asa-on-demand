@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { MAX_IDLE_MINUTES, MAX_PLAYERS, MAX_SESSION_HOURS, MIN_IDLE_MINUTES, MIN_SESSION_HOURS } from "../src/shared/defaults.js";
+import { MAX_IDLE_MINUTES, MAX_PLAYERS, MIN_IDLE_MINUTES } from "../src/shared/defaults.js";
 import { ASA_MAPS, isSupportedAsaMap, parseEnabledMaps } from "../src/shared/maps.js";
 
 interface Arguments {
@@ -105,14 +105,6 @@ const commands = [
             required: false,
             min_value: MIN_IDLE_MINUTES,
             max_value: MAX_IDLE_MINUTES,
-          },
-          {
-            name: "session_hours",
-            description: "Maximum reserved session length in task-hours",
-            type: 4,
-            required: false,
-            min_value: MIN_SESSION_HOURS,
-            max_value: MAX_SESSION_HOURS,
           },
           {
             name: "map",

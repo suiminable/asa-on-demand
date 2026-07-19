@@ -50,7 +50,7 @@ migration 前に、CDK output に `AsaClusterFileSystemId`、`AsaClusterAccessPo
 2. 最後の legacy backup を実行する。
 3. 正確な `asaClusterId` を記録する。
 4. DynamoDB の on-demand backup を作成し、`<resourcePrefix>/saves/current.tar.zst` の現在の S3 object version を保全する。
-5. archive の一覧を取得し、`Saved/clusters/<asaClusterId>/` が含まれることを確認する。
+5. archive の一覧を取得し、`Saved/clusters/clusters/<asaClusterId>/` が含まれることを確認する。
 
 archive 確認例:
 
@@ -59,7 +59,7 @@ aws s3 cp s3://BUCKET/PREFIX/saves/current.tar.zst /tmp/asa-legacy-current.tar.z
 tar --zstd -tf /tmp/asa-legacy-current.tar.zst | less
 ```
 
-実データの archive が `Saved/clusters/<asaClusterId>` を使っていない場合は作業を中止する。one-shot task は、異なる分割規則を推測せず、意図的に処理を拒否する。
+実データの archive が `Saved/clusters/clusters/<asaClusterId>` を使っていない場合は作業を中止する。one-shot task は、異なる分割規則を推測せず、意図的に処理を拒否する。ASA は `-ClusterDirOverride` の下に内部 namespace `clusters/<clusterId>` を作成する。
 
 ## 3. One-shot migration を実行する
 
@@ -79,7 +79,7 @@ migration task は次を行う。
 
 - 展開前に archive path を検証する
 - archive 内の link/device を拒否し、EFS copy を staging してから昇格する
-- `Saved/clusters/<clusterId>` を EFS の `/cluster-data/<clusterId>` へコピーする
+- `Saved/clusters/clusters/<clusterId>` を EFS の `/cluster-data/clusters/<clusterId>` へコピーする
 - Map archive から `Saved/clusters` を削除する
 - 注入済み password が新しい save key へコピーされないよう、生成済み `GameUserSettings.ini`/`Game.ini` を Map archive から削除する
 - 指定した各 Map に `maps/<mapId>/saves/current.tar.zst` を作成する
@@ -87,7 +87,7 @@ migration task は次を行う。
 - すべてのコピー完了後にだけ `migration/parallel-storage-v2.json` を書き込む
 - legacy archive は変更しない
 - wrapper から marker と指定した全 Map archive を検証する
-- legacy budget counter と DynamoDB の `CLUSTER` schema を初期化する
+- DynamoDB の `CLUSTER` schema を初期化する
 
 `--allow-overwrite` は通常の retry option ではなく、復旧用の switch である。使用前に S3/EFS の部分的な結果を調査し、もう一度 backup を取得すること。上書きを許可した retry では、以前の live directory を `.pre-migration-*` として退避し、UID/GID 10001 で完全にコピーした staging directory を昇格する。退避したコピーは受入試験完了後に手動で削除するまで残る。
 
@@ -108,7 +108,7 @@ migration task は次を行う。
   --rollback-key PREFIX/rollback-rehearsal/current.tar.zst
 ```
 
-結果を download し、Map save と `Saved/clusters/<clusterId>` の両方が存在することを確認する。本番 rollback では、さらに旧 task/Lambda code の再デプロイと、DynamoDB backup から停止状態の `SERVER` row を再作成する必要がある。この手順を rehearsal するまで並列化を有効にしないこと。
+結果を download し、Map save と `Saved/clusters/clusters/<clusterId>` の両方が存在することを確認する。本番 rollback では、さらに旧 task/Lambda code の再デプロイと、DynamoDB backup から停止状態の `SERVER` row を再作成する必要がある。この手順を rehearsal するまで並列化を有効にしないこと。
 
 ## 5. EFS backup/restore を rehearsal する
 
@@ -116,7 +116,7 @@ stack は、暗号化・保持設定済みの Regional EFS と backup vault、7 
 
 ASA build 更新または本番 migration の前に、`AsaClusterFileSystemId` に対する AWS Backup の on-demand job を開始する。すべての Map が停止している間に作成された recovery point を `known-good` として記録する。
 
-item-level restore では、大文字・小文字を区別して `/cluster-data/<clusterId>` を既存 file system へ復元する。AWS Backup は移行元を直接上書きせず、復元内容を新しい `aws-backup-restore_<timestamp>` recovery directory 以下に配置する。restore job が成功した後、すべての Map を停止したまま次を実行して昇格する。
+item-level restore では、大文字・小文字を区別して `/cluster-data/clusters/<clusterId>` を既存 file system へ復元する。AWS Backup は移行元を直接上書きせず、復元内容を新しい `aws-backup-restore_<timestamp>` recovery directory 以下に配置する。restore job が成功した後、すべての Map を停止したまま次を実行して昇格する。
 
 ```bash
 ./scripts/run-storage-migration.sh \
@@ -125,7 +125,7 @@ item-level restore では、大文字・小文字を区別して `/cluster-data/
   --stack-name STACK_NAME \
   --mode restore-cluster \
   --cluster-id EXISTING_CLUSTER_ID \
-  --restored-cluster-path aws-backup-restore_TIMESTAMP/cluster-data/EXISTING_CLUSTER_ID \
+  --restored-cluster-path aws-backup-restore_TIMESTAMP/cluster-data/clusters/EXISTING_CLUSTER_ID \
   --allow-overwrite
 ```
 

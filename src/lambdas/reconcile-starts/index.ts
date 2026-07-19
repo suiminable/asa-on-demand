@@ -73,12 +73,12 @@ async function reconcile(operation: StartOperation): Promise<void> {
     return;
   if (state.status === "STOPPING") {
     if (await stoppingTaskStillExists(operation, state)) return;
-    await store.rollbackMapStart(operation.mapId, operation.runId, operation.reservations, "STALE_STOPPING_START_RECONCILED");
+    await store.rollbackMapStart(operation.mapId, operation.runId, "STALE_STOPPING_START_RECONCILED");
     return;
   }
   const taskArn = await taskFor(operation, state.taskArn);
   if (!taskArn) {
-    await store.rollbackMapStart(operation.mapId, operation.runId, operation.reservations, "STALE_START_RECONCILED");
+    await store.rollbackMapStart(operation.mapId, operation.runId, "STALE_START_RECONCILED");
     return;
   }
   if (!(await store.attachStartedTask(operation.mapId, operation.runId, taskArn))) return;

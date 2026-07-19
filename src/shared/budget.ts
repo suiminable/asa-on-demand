@@ -41,12 +41,17 @@ export function activeRuntimeSecondsThisMonth(startedAt: string | null | undefin
   return Math.max(0, Math.floor((now.getTime() - start) / 1000));
 }
 
-export function currentMonthRuntimeSeconds(params: { budget: BudgetState | undefined; taskStartedAt?: string | null; now?: Date }): number {
-  return (params.budget?.runtimeSeconds ?? 0) + activeRuntimeSecondsThisMonth(params.taskStartedAt, params.now ?? new Date());
-}
-
-export function committedRuntimeSeconds(budget: BudgetState | undefined): number {
-  return budget?.committedRuntimeSeconds ?? (budget?.runtimeSeconds ?? 0) + (budget?.reservedRuntimeSeconds ?? 0);
+export function currentMonthRuntimeSeconds(params: {
+  budget: BudgetState | undefined;
+  activeTaskStartedAt?: ReadonlyArray<string | null | undefined>;
+  now?: Date;
+}): number {
+  const now = params.now ?? new Date();
+  const activeRuntime = (params.activeTaskStartedAt ?? []).reduce(
+    (total, startedAt) => total + activeRuntimeSecondsThisMonth(startedAt, now),
+    0,
+  );
+  return (params.budget?.runtimeSeconds ?? 0) + activeRuntime;
 }
 
 export interface RuntimeSlice {
@@ -78,43 +83,16 @@ export function splitRuntimeByJstMonth(startedAt: string | null | undefined, sto
   });
 }
 
-export function splitReservationByJstMonth(startedAt: Date, durationSeconds: number): RuntimeSlice[] {
-  if (!Number.isInteger(durationSeconds) || durationSeconds <= 0 || durationSeconds > 48 * 3600) {
-    throw new Error("Reservation duration must be an integer from 1 second through 48 hours.");
-  }
-  return splitRuntimeByJstMonth(startedAt.toISOString(), new Date(startedAt.getTime() + durationSeconds * 1000));
-}
-
 export function canStart(params: {
-  budget: BudgetState | undefined;
+  currentMonthRuntimeSeconds: number;
   monthlyRuntimeHoursLimit: number;
 }): { ok: true } | { ok: false; reason: string } {
-  const runtimeSeconds = params.budget?.runtimeSeconds ?? 0;
-  const runtimeHours = runtimeSeconds / 3600;
+  const runtimeHours = params.currentMonthRuntimeSeconds / 3600;
   if (runtimeHours >= params.monthlyRuntimeHoursLimit) {
     return {
       ok: false,
       reason: `Monthly runtime limit has been reached (${runtimeHours.toFixed(1)}h / ${params.monthlyRuntimeHoursLimit}h).`,
     };
-  }
-  return { ok: true };
-}
-
-export function canReserve(params: {
-  reservations: RuntimeSlice[];
-  budgets: Map<string, BudgetState | undefined>;
-  monthlyRuntimeHoursLimit: number;
-}): { ok: true } | { ok: false; reason: string } {
-  const limitSeconds = params.monthlyRuntimeHoursLimit * 3600;
-  for (const reservation of params.reservations) {
-    const budget = params.budgets.get(reservation.budgetPk);
-    const after = committedRuntimeSeconds(budget) + reservation.runtimeSeconds;
-    if (after > limitSeconds) {
-      return {
-        ok: false,
-        reason: `Monthly runtime reservation would exceed the limit for ${reservation.budgetPk.slice(7)} (${hours(after)}h / ${params.monthlyRuntimeHoursLimit}h).`,
-      };
-    }
   }
   return { ok: true };
 }

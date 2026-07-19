@@ -11,7 +11,7 @@ Usage:
     --cluster-id CLUSTER_ID --rollback-map the-island [--rollback-key KEY] [--profile PROFILE] [--region REGION]
 
   scripts/run-storage-migration.sh --stack-name STACK --mode restore-cluster \
-    --cluster-id CLUSTER_ID --restored-cluster-path aws-backup-restore_TIMESTAMP/cluster-data/CLUSTER_ID
+    --cluster-id CLUSTER_ID --restored-cluster-path aws-backup-restore_TIMESTAMP/cluster-data/clusters/CLUSTER_ID
 
 The task refuses to overwrite any destination by default. Use --allow-overwrite only
 after taking the S3/DynamoDB/EFS backups described in the runbook.
@@ -197,25 +197,11 @@ if [[ "${mode}" == "migrate-parallel" ]]; then
   done
   echo "Verified the migration marker and ${#requested_map_ids[@]} Map archive object(s)."
 
-  budget_pks="$(aws "${aws_args[@]}" dynamodb scan \
-    --table-name "${state_table}" \
-    --filter-expression 'begins_with(pk, :prefix)' \
-    --expression-attribute-values '{":prefix":{"S":"BUDGET#"}}' \
-    --projection-expression pk \
-    --query 'Items[].pk.S' \
-    --output text)"
-  for budget_pk in ${budget_pks}; do
-    aws "${aws_args[@]}" dynamodb update-item \
-      --table-name "${state_table}" \
-      --key "$(jq -cn --arg pk "${budget_pk}" '{pk:{S:$pk}}')" \
-      --update-expression 'SET committedRuntimeSeconds = if_not_exists(committedRuntimeSeconds, runtimeSeconds), reservedRuntimeSeconds = if_not_exists(reservedRuntimeSeconds, :zero)' \
-      --expression-attribute-values '{":zero":{"N":"0"}}' >/dev/null
-  done
   aws "${aws_args[@]}" dynamodb update-item \
     --table-name "${state_table}" \
     --key '{"pk":{"S":"CLUSTER"}}' \
     --update-expression 'SET activeCount = if_not_exists(activeCount, :zero), maxConcurrentMaps = if_not_exists(maxConcurrentMaps, :one), schemaVersion = :schema, updatedAt = :now' \
     --expression-attribute-values "$(jq -cn --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       '{":zero":{N:"0"},":one":{N:"1"},":schema":{N:"2"},":now":{S:$now}}')" >/dev/null
-  echo "DynamoDB budget counters and CLUSTER schema were initialized for schema version 2."
+  echo "The DynamoDB CLUSTER schema was initialized for schema version 2."
 fi

@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   s3Send: vi.fn(),
   schedulerSend: vi.fn(),
   getMap: vi.fn(),
+  getMaps: vi.fn(),
   getBudget: vi.fn(),
   updateRunningIdleState: vi.fn(),
   markMapStopping: vi.fn(),
@@ -45,6 +46,7 @@ vi.mock("../src/shared/discord.js", () => ({ postWebhook: mocks.postWebhook }));
 vi.mock("../src/shared/state.js", () => ({
   StateStore: class {
     getMap = mocks.getMap;
+    getMaps = mocks.getMaps;
     getBudget = mocks.getBudget;
     updateRunningIdleState = mocks.updateRunningIdleState;
     markMapStopping = mocks.markMapStopping;
@@ -53,25 +55,25 @@ vi.mock("../src/shared/state.js", () => ({
 
 import { handler } from "../src/lambdas/stop-server/index.js";
 
-function runningState() {
+function runningState(values: Record<string, unknown> = {}) {
+  const mapId = String(values.mapId ?? "the-island");
   return {
-    pk: "MAP#the-island",
-    mapId: "the-island",
-    arkMapName: "TheIsland_WP",
+    pk: `MAP#${mapId}`,
+    mapId,
+    arkMapName: mapId === "the-island" ? "TheIsland_WP" : "ScorchedEarth_WP",
     status: "RUNNING",
-    runId: "run-island-12345678",
-    taskArn: "task-1",
+    runId: `run-${mapId}-12345678`,
+    taskArn: `task-${mapId}`,
     clusterArn: "cluster",
     startedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
     taskStartedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
-    expiresAt: new Date(Date.now() + 8 * 3600_000).toISOString(),
-    sessionName: "private-asa-island",
+    sessionName: `private-asa-${mapId}`,
     maxPlayers: 4,
     idleTimeoutMinutes: 30,
     idleSince: null,
     lastHeartbeatAt: null,
-    reservations: [],
     updatedAt: new Date().toISOString(),
+    ...values,
   };
 }
 
@@ -84,6 +86,7 @@ beforeEach(() => {
   mocks.s3Send.mockReset();
   mocks.schedulerSend.mockReset().mockResolvedValue({});
   mocks.getMap.mockReset();
+  mocks.getMaps.mockReset().mockResolvedValue([]);
   mocks.getBudget.mockReset().mockResolvedValue(undefined);
   mocks.updateRunningIdleState.mockReset().mockResolvedValue(true);
   mocks.markMapStopping.mockReset().mockResolvedValue(true);
@@ -113,13 +116,25 @@ describe("map-scoped stop checks", () => {
     expect(mocks.schedulerSend).not.toHaveBeenCalled();
   });
 
-  it("stops exactly the matching task when its reserved session expires", async () => {
-    const state = runningState();
-    state.expiresAt = new Date(Date.now() - 1000).toISOString();
-    mocks.getMap.mockResolvedValue(state);
-    expect(await handler(input(state))).toEqual({ stopped: true, reason: "SESSION_EXPIRED" });
-    expect(mocks.ecsSend).toHaveBeenCalledOnce();
-    expect(mocks.markMapStopping).toHaveBeenCalledWith(state.mapId, state.runId, state.taskArn, "SESSION_EXPIRED");
-    expect(mocks.schedulerSend).toHaveBeenCalledOnce();
+  it("applies each Map session's idle timeout without sharing idle progress", async () => {
+    const idleSince = new Date(Date.now() - 2 * 60_000).toISOString();
+    const lastHeartbeatAt = idleSince;
+    const heartbeatAt = new Date(Date.now() - 60_000).toISOString();
+    const island = runningState({ idleTimeoutMinutes: 1, idleSince, lastHeartbeatAt });
+    const scorched = runningState({ mapId: "scorched-earth", idleTimeoutMinutes: 30, idleSince, lastHeartbeatAt });
+    mocks.getMaps.mockResolvedValue([island, scorched]);
+    mocks.s3Send.mockImplementation((command) => {
+      const mapId = command.input.Key.includes("scorched-earth") ? "scorched-earth" : "the-island";
+      const current = mapId === "the-island" ? island : scorched;
+      return Promise.resolve({
+        Body: { transformToString: async () => JSON.stringify({ playerCount: 0, updatedAt: heartbeatAt, runId: current.runId, mapId }) },
+      });
+    });
+
+    mocks.getMap.mockResolvedValueOnce(island).mockResolvedValueOnce(scorched);
+    expect(await handler(input(island))).toEqual({ stopped: true, reason: "IDLE_TIMEOUT" });
+    expect(await handler(input(scorched))).toEqual({ stopped: false, reason: "RCON_ZERO" });
+    expect(mocks.markMapStopping).toHaveBeenCalledOnce();
+    expect(mocks.markMapStopping).toHaveBeenCalledWith(island.mapId, island.runId, island.taskArn, "IDLE_TIMEOUT");
   });
 });

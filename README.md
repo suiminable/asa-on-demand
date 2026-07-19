@@ -187,7 +187,7 @@ pnpm run image:push --profile my-aws-profile
 - Fargate Spot is the default capacity provider strategy. On-demand fallback is disabled unless `-c enableOnDemandFallback=true` is provided.
 - The default task size is 4 vCPU and 24 GiB memory.
 - Discord budget output shows both a conservative estimate (`hourlyCostJpy`, default 52 JPY/hour) and a variable Fargate Spot estimate (`spotHourlyCostJpy`, default 17 JPY/hour).
-- `/asa start` reserves `session_hours` from 1 to 48 (default 8) against the monthly task-hour budget. It also accepts `idle_minutes` from 1 to 1440 (default 30) and stops after distinct fresh heartbeats report zero players for that interval. Missing or stale/wrong-run heartbeats do not trigger an idle stop.
+- `/asa start` accepts `idle_minutes` from 1 to 1440 (default 30). Each Map session tracks its own timeout and Map-scoped heartbeat, and stops only after distinct fresh heartbeats for that session report zero players for the configured interval. Missing or stale/wrong-run heartbeats do not trigger an idle stop. The monthly task-hour limit uses settled runtime plus the actual elapsed runtime of every active Map; it does not reserve a fixed session duration.
 - ASA and UMU-Proton are installed when `scripts/push-image.sh` builds the Docker image. CDK synth and deploy do not invoke Docker.
 - To pick up an ASA update, first run `./scripts/push-image.sh --build-id 2026-07-05`, then deploy with the same tag using `pnpm exec cdk deploy -c asaBuildId=2026-07-05`. A missing or mismatched tag makes the ECS task stop with an image pull error.
 - `-c asaUpdateOnStart=true` enables a SteamCMD update on every task start for emergency use. It is disabled by default.
