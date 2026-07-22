@@ -66,14 +66,15 @@ If the real archive does not use `Saved/clusters/clusters/<asaClusterId>`, stop.
 The wrapper refuses to run while the dedicated ECS cluster has RUNNING/PENDING tasks or `CLUSTER.activeCount` is non-zero. Destinations are non-overwriting by default.
 
 ```bash
-./scripts/run-storage-migration.sh \
+pnpm run storage:migration -- migrate-parallel \
   --profile PROFILE \
   --region ap-northeast-1 \
   --stack-name STACK_NAME \
-  --mode migrate-parallel \
   --cluster-id EXISTING_CLUSTER_ID \
   --maps the-island,scorched-earth
 ```
+
+Add `--dry-run` first to resolve the stack and perform the read-only preflight without starting the migration task.
 
 The migration task:
 
@@ -98,11 +99,10 @@ The dedicated task uses the same ephemeral-storage size as the game task because
 While all Map tasks are stopped, export one selected Map plus the current EFS cluster data back into the legacy archive shape. Use a new rollback key for rehearsal.
 
 ```bash
-./scripts/run-storage-migration.sh \
+pnpm run storage:migration -- export-legacy \
   --profile PROFILE \
   --region ap-northeast-1 \
   --stack-name STACK_NAME \
-  --mode export-legacy \
   --cluster-id EXISTING_CLUSTER_ID \
   --rollback-map the-island \
   --rollback-key PREFIX/rollback-rehearsal/current.tar.zst
@@ -119,11 +119,10 @@ Before an ASA build update or production migration, start an on-demand AWS Backu
 For an item-level restore, restore the case-sensitive path `/cluster-data/clusters/<clusterId>` to the existing file system. AWS Backup places restored content under a new `aws-backup-restore_<timestamp>` recovery directory instead of overwriting the source. After the restore job succeeds and while all Maps remain stopped, promote it with:
 
 ```bash
-./scripts/run-storage-migration.sh \
+pnpm run storage:migration -- restore-cluster \
   --profile PROFILE \
   --region ap-northeast-1 \
   --stack-name STACK_NAME \
-  --mode restore-cluster \
   --cluster-id EXISTING_CLUSTER_ID \
   --restored-cluster-path aws-backup-restore_TIMESTAMP/cluster-data/clusters/EXISTING_CLUSTER_ID \
   --allow-overwrite

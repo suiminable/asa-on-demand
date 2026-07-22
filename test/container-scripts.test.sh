@@ -291,29 +291,4 @@ if env \
   fail "restore accepted an archive containing a symbolic link"
 fi
 
-wrapper_log="${work_root}/wrapper-aws.log"
-export FAKE_AWS_LOG="${wrapper_log}"
-if bash "${repo_root}/scripts/run-storage-migration.sh" \
-  --stack-name fixture-stack \
-  --mode migrate-parallel \
-  --cluster-id "${cluster_id}" \
-  --maps the-island,the-island >/dev/null 2>&1; then
-  fail "migration wrapper accepted duplicate map IDs"
-fi
-bash "${repo_root}/scripts/run-storage-migration.sh" \
-  --stack-name fixture-stack \
-  --mode migrate-parallel \
-  --cluster-id "${cluster_id}" \
-  --maps the-island,scorched-earth
-grep -Fq 'ecs run-task' "${wrapper_log}" || fail "migration wrapper did not start the dedicated task"
-grep -Fq '"name":"ASA_OPERATION_MODE","value":"migrate-parallel"' "${wrapper_log}" \
-  || fail "migration wrapper did not pass the selected operation mode"
-grep -Fq '"name":"MIGRATION_MAP_IDS","value":"the-island,scorched-earth"' "${wrapper_log}" \
-  || fail "migration wrapper did not pass the Map set"
-grep -Fq 'dynamodb update-item' "${wrapper_log}" || fail "migration wrapper did not initialize schema v2"
-if grep -Fq 'dynamodb scan' "${wrapper_log}"; then
-  fail "migration wrapper still initializes removed budget reservation fields"
-fi
-unset FAKE_AWS_LOG
-
 echo "Container storage and migration script assertions passed."
