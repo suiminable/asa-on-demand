@@ -1,204 +1,275 @@
 # ASA On Demand
 
-ARK: Survival Ascended のプライベート専用サーバーを ECS Fargate Spot で動かし、Discord のスラッシュコマンドで操作する AWS CDK v2 プロジェクト。
+ARK: Survival Ascended のプライベートサーバーを ECS Fargate Spot で起動し、Discord のスラッシュコマンドで操作する AWS CDK v2 プロジェクト。
 
-元の仕様書は [asa-fargate-spot-discord-spec.md](./asa-fargate-spot-discord-spec.md)、英語版 README は [README.md](./README.md)。
+[English](./README.md)
 
-## パッケージマネージャ
+## インフラ全体像
 
-npm ではなく pnpm を使う。ワークスペース設定は `pnpm-workspace.yaml` にある。
+1つの CloudFormation stackを、独立した1つの ASA cluster環境として扱う。常駐する ECS Service はなく、Discord commandを受けたときだけ選択したMapのFargate taskを起動し、手動停止・idle timeout・異常終了で停止する。各Mapは独立したtaskとS3 namespaceを持ち、Cross-ARK cluster dataだけをEFSで共有する。
 
-`minimumReleaseAge: 10080` を設定している。分単位で 1 週間に相当する。
+```mermaid
+flowchart TB
+  Player["ASA client"]
+  Discord["Discord"]
+  Operator["Operator<br/>CDK and image tools"]
+  Config["Pre-created SSM parameters<br/>and Secrets Manager secrets"]
 
-## セットアップ
+  subgraph Stack["AsaFargateStack-{resourcePrefix}"]
+    subgraph Control["Control plane"]
+      Api["API Gateway HTTP API<br/>/discord/interactions"]
+      DiscordFn["Discord Lambda<br/>auth, commands, RunTask"]
+      State["DynamoDB<br/>Map / cluster / operation state"]
+      TaskEvents["EventBridge<br/>ECS task state changes"]
+      EventsFn["Task-events Lambda<br/>settlement, IP, notifications"]
+      Scheduler["EventBridge Scheduler<br/>per-Map idle checks"]
+      StopFn["Stop Lambda<br/>idle and manual stop"]
+      Reconcile["5-minute reconciler<br/>repairs stale starts"]
+    end
+
+    subgraph Vpc["VPC: two public subnets, no NAT Gateway"]
+      Tasks["ECS Fargate Spot<br/>one task per active Map"]
+      Efs["Encrypted EFS<br/>shared Cross-ARK data"]
+    end
+
+    Ecr["Dedicated ECR repository"]
+    S3["Versioned S3 state bucket<br/>config, saves, backups, runtime"]
+    Backup["AWS Backup<br/>EFS recovery points"]
+    Logs["CloudWatch Logs"]
+    Dns["Route 53 records<br/>(optional)"]
+  end
+
+  Discord --> Api --> DiscordFn
+  DiscordFn <--> State
+  DiscordFn -->|RunTask| Tasks
+  DiscordFn -->|manual stop| StopFn
+  Scheduler --> StopFn -->|StopTask| Tasks
+  Reconcile --> State
+  Reconcile --> Tasks
+  Tasks --> TaskEvents --> EventsFn
+  EventsFn --> State
+  EventsFn -->|lifecycle notification| Discord
+  EventsFn -.-> Dns
+
+  Player -->|UDP 7777 / 7778<br/>public IP or DNS| Tasks
+  Ecr --> Tasks
+  Config --> DiscordFn
+  Config --> Tasks
+  Tasks <--> S3
+  Tasks <--> Efs
+  Efs --> Backup
+  Tasks --> Logs
+  DiscordFn --> Logs
+
+  Operator -->|deploy / image push| Stack
+```
+
+### コンポーネントの責務
+
+| 領域 | Resource | 責務 |
+| --- | --- | --- |
+| Entry point | API Gateway、Discord Lambda | Discord署名と権限を検証し、commandをdeferしてstart/stop/statusを調整する。 |
+| Compute | ECS cluster、game task definition | ActiveなMapごとにpublic IP付きFargate taskを1つ起動する。Fargate Spotを優先し、on-demand fallbackは明示的に有効化する。 |
+| Lifecycle | ECS events Lambda、stop Lambda、reconciler、Scheduler | Task stateの確定、接続先の通知、idle stop、staleなstart operationの復旧を行う。 |
+| Persistent state | S3、DynamoDB、EFS | Map archive/runtime object、control-plane state、共有Cross-ARK dataをそれぞれ保存する。 |
+| Image | Stack専用ECR repository | `asaBuildId`で選択するserver imageを保存し、最新2imageを保持する。 |
+| Recovery | S3 versioning、AWS Backup | 過去のMap archiveを保持し、EFSのhourly/daily recovery pointを作る。 |
+| Optional | Route 53、AWS Budgets | `<mapId>.<domain>` recordと、明示的に有効化した場合のcost alertを提供する。 |
+
+### 起動から停止まで
+
+1. `/asa start` が、DynamoDB上でMapとcluster concurrency slotをatomicに確保する。
+2. Discord Lambdaが、選択したMap、session設定、S3 key、安定した`asaClusterId`を渡してFargate taskを起動する。
+3. ContainerがそのMapのsaveをS3から復元し、EFSの共有Cross-ARK dataをmountし、共通設定とMap固有設定をoverlayしてProton経由でASAを起動する。
+4. Heartbeatとready情報をMapのS3 namespaceへ書き込む。ECS task eventがDynamoDB、任意のDNS、Discord通知を更新する。
+5. 手動停止またはidle判定でstop Lambdaを呼ぶ。Containerは終了前にworldを保存し、task-events Lambdaがruntimeとcost counterを確定する。
+
+Load balancerとECS Serviceは存在しない。Clientはtaskのpublic IP、または任意のRoute 53 recordへ直接接続する。
+
+## 環境とstateの境界
+
+独立した環境ごとに`main`のような単純な`resourcePrefix`を使う。Map名や先頭・末尾の`/`は含めない。Applicationが内部のS3 prefixへ正規化する。`resourcePrefix=main`の場合:
+
+- stack名は`AsaFargateStack-main`
+- SSMとSecrets Managerは`/asa/main/...`
+- log groupは`/asa/main/...`
+- S3の永続objectは次のlayoutになる
+
+```text
+main/
+├── config/
+│   ├── common/                         # 全Mapへ適用
+│   └── maps/<mapId>/                   # Map固有overlay
+├── maps/<mapId>/
+│   ├── saves/current.tar.zst           # Cross-ARK dataを含まないMap save
+│   ├── backups/
+│   └── runtime/                        # Heartbeat、ready、backup request
+└── logs/
+```
+
+Stateの所有範囲は意図的に分けている。
+
+| State | Store | Scope |
+| --- | --- | --- |
+| Map worldとlocal save | S3 archive | 1 Map |
+| Cross-ARK survivor/tribute data | 暗号化EFS | 1 stack内の全Map |
+| Active task、operation、runtime集計 | DynamoDB | 1 stack |
+| Server image | ECR | 1 stack・1 build tag |
+
+StackをdestroyしてもS3、EFS、DynamoDB、EFS backup vaultはretainされる。ECR imageとCloudWatch log groupは破棄可能なresourceとして扱う。S3のnoncurrent versionは7日で期限切れになり、EFS backupはデフォルトでhourlyを7日、dailyを35日保持する。
+
+Cross-stack transferはサポートしない。
+
+## 開発環境のセットアップ
+
+必要なもの: Node.js 22以降、pnpm、Docker、AWS CLIの認証情報、対象serverへapplicationをinstallしてwebhookを作成できるDiscord account。
 
 ```bash
 pnpm install
-pnpm run build
-pnpm run test
-pnpm run synth
 ```
 
-## 初回構築手順
+Repository commandにはnpmではなくpnpmを使う。検証commandは[コマンド](#コマンド)にまとめている。
 
-以下の例は `--profile my-aws-profile` とリソースプレフィックス `maps/the-island` を使う。プレフィックスなしのデフォルト環境では `--resource-prefix`、`--resourcePrefix`、`-c resourcePrefix`、`RESOURCE_PREFIX` を省略する。Docker と AWS 認証情報が必要。
+### Discord Applicationの作成とInstall
 
-1. アカウントとリージョンを bootstrap する(アカウント/リージョンごとに 1 回):
+Discord APIとこのrepositoryでは、Discord serverを*guild*と表記する。
+
+1. [Discord Developer Portal](https://discord.com/developers/applications)を開き、**New Application**を選び、名前を入力してapplicationを作成する。
+2. **General Information**で**Application ID**と**Public Key**をcopyする。**Interactions Endpoint URL**はAWS stackのdeployが終わるまで空のままにする。
+3. **Bot**を開く。新規applicationにはbot userがすでに存在するため、**Token**の**Reset Token**からtokenを発行してcopyする。Tokenが表示されるのは発行時だけ。OAuth2 client secretと取り違えず、bot tokenをcommitしないこと。
+4. **Installation**を開いてapplicationを設定する。
+   - **Guild Install**を有効にする。このprojectでは**User Install**を使わない。
+   - Install linkには**Discord Provided Link**を選ぶ。
+   - **Default Install Settings**の**Guild Install**へ、`applications.commands`と`bot`のscopeを追加する。
+   - Bot permissionとprivileged Gateway Intentは不要。CommandはHTTP interactions endpointで受信し、lifecycle通知にはwebhookを使う。
+5. Install linkをcopyしてbrowserで開き、**Add to server**から対象serverを選ぶ。Server applicationのinstallにはDiscordの**Manage Server**権限が必要。
+6. Discord clientの**User Settings > Advanced > Developer Mode**を有効にする。対象serverを右clickして**Copy Server ID**を選ぶ。操作を許可するmemberは右clickして**Copy User ID**、roleは**Server Settings > Roles**からrole IDをcopyする。Allowed userとallowed roleの少なくとも一方にはIDが必要。Copy操作が表示されない場合は[DiscordのID取得ガイド](https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID)を参照する。
+7. 通知用webhookはapplicationとは別に作成する。**Server Settings > Integrations > Webhooks**を開き、**Create Webhook**を選び、通知先channelを指定してwebhook URLをcopyする。このURLはsecretとして扱う。Discord公式の[webhookガイド](https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks)にも同じserver側の手順がある。
+
+取得した値とconfiguration templateの対応は次のとおり。
+
+| Discordの値 | Templateの値 | AWSの保存先 |
+| --- | --- | --- |
+| Bot Token | `<discord bot token>` | Secrets Manager `/discord/bot-token` |
+| 通知webhook URL | `<discord webhook url>` | Secrets Manager `/discord/notification-webhook-url` |
+| Application ID | `<application id>` | SSM `/discord/application-id` |
+| Public Key | `<public key>` | SSM `/discord/public-key` |
+| Server ID | `<guild id>` | SSM `/discord/guild-id` |
+| Role ID・user ID | `["123456789012345678"]`のようなJSON array | SSM `/discord/allowed-role-ids`・`/discord/allowed-user-ids` |
+
+IDはJSON array内でもstringとして記載する。**Interactions Endpoint URL**の設定とguild commandの登録は、endpointとconfigurationを作成した後に[初回デプロイ](#初回デプロイ)で行う。
+
+## 初回デプロイ
+
+次の例では`main`環境を作る。Workflow全体で同じprofile、region、prefix、build IDを使う。Command lineのCDK contextは環境設定として保存されないため、以後のdeployでもすべての非default値を指定する。
+
+1. Account・regionごとに1回だけCDKをbootstrapする。
 
    ```bash
-   pnpm exec cdk bootstrap
+   pnpm exec cdk bootstrap --profile my-aws-profile -c region=ap-northeast-1
    ```
 
-2. スタックをデプロイする。デプロイで専用 ECR リポジトリが作られるため、イメージが存在しない状態でも初回デプロイは成功する:
+2. Infrastructureをdeployする。この時点では参照するimage tagがなくてもよい。ECS Serviceがないため自動起動しない。
 
    ```bash
    pnpm exec cdk deploy \
+     --profile my-aws-profile \
      -c region=ap-northeast-1 \
-     -c resourcePrefix=maps/the-island \
+     -c resourcePrefix=main \
+     -c asaBuildId=BUILD_ID \
      -c monthlyBudgetJpy=1500 \
      -c monthlyRuntimeHoursLimit=80
    ```
 
-3. サーバーイメージをビルドして push する。ビルド中に SteamCMD が ASA サーバーをダウンロードし、イメージは約 18.5 GB になる:
+3. Stack専用ECR repositoryへ、同じbuild IDのimageをbuild・pushする。
 
    ```bash
    ./scripts/push-image.sh \
-     --region ap-northeast-1 \
      --profile my-aws-profile \
-     --resource-prefix maps/the-island
+     --region ap-northeast-1 \
+     --resource-prefix main \
+     --build-id BUILD_ID
    ```
 
-4. シークレットとパラメータを登録する(詳細は[シークレットとパラメータ](#シークレットとパラメータ)):
+4. Exampleをtemplateとしてsecretとparameterを作る。値を設定したcopyはgitignore済みの`local/`へ置く。
 
    ```bash
-   RESOURCE_PREFIX=maps/the-island ./local/put-secrets.sh --profile my-aws-profile
+   mkdir -p local
+   cp scripts/put-secrets.example.sh local/put-secrets.sh
+   RESOURCE_PREFIX=main ./local/put-secrets.sh --profile my-aws-profile
    ```
 
-5. 任意: サーバー設定をステートバケット(CDK 出力 `AsaStateBucketName`)の `config/` プレフィックスにアップロードする。コンテナは起動のたびにこれをダウンロードする:
-
-   ```bash
-   aws s3 cp local/GameUserSettings.ini "s3://<AsaStateBucketName>/maps/the-island/config/GameUserSettings.ini"
-   aws s3 cp local/Game.ini "s3://<AsaStateBucketName>/maps/the-island/config/Game.ini"
-   ```
-
-6. Discord Developer Portal で Interactions Endpoint URL に CDK 出力 `DiscordInteractionsEndpointUrl` を設定する。Discord は署名付き ping でエンドポイントを検証するため、手順 4 で public key を登録した後でないと設定に失敗する。
-
-7. ギルドコマンドを登録する(詳細は [Discord](#discord)):
+5. Discord Developer Portalでapplicationの**General Information**を開く。Stack output `DiscordInteractionsEndpointUrl`を**Interactions Endpoint URL**へ貼り付けて保存する。Discordによるendpointの検証が成功したら、guild commandを登録する。
 
    ```bash
    pnpm run discord:register \
      --profile my-aws-profile \
-     --resourcePrefix maps/the-island
+     --resourcePrefix main
    ```
 
-8. ギルドで `/asa start` を実行する。
+6. Guildで`/asa start`を実行する。
 
-順序の制約:
+手順6より前にimageが必要。Endpointの検証とcommand登録より前にDiscord credentialが必要。Destroy/deployでAPI Gateway URLが変わるため、再deploy後はDeveloper Portalも更新する。
 
-- 手順 3 の前に `/asa start` すると、ECS タスクはイメージの pull エラーで停止する。
-- 手順 6 と 7 は、どちらも Discord の認証情報を SSM と Secrets Manager から読むため、手順 4 の前に実行すると失敗する。
-- destroy → deploy をやり直すと API Gateway の URL が変わるため、手順 6 を再実行する。teardown 時にシークレットとパラメータも削除した場合は手順 4 も再実行する。Discord コマンド自体は登録されたまま残るので再登録は不要。
+## 設定
 
-## リソースプレフィックス
+`resourcePrefix=main`の場合、configurationは`/asa/main`以下に置く。Stackはこれらの名前へのaccessを許可するが、値自体は作成しない。
 
-`-c resourcePrefix` を設定すると、独立したサーバー環境ごとに CloudFormation スタックと S3 オブジェクト名前空間を分離できる。`resourcePrefix=maps/the-island` の場合、ステートファイルは以下に保存される:
+| Store | 必須suffix |
+| --- | --- |
+| Secrets Manager | `/discord/bot-token`、`/discord/notification-webhook-url`、`/server/password`、`/server/admin-password` |
+| SSM Parameter Store | `/discord/application-id`、`/discord/public-key`、`/discord/guild-id`、`/discord/allowed-role-ids`、`/discord/allowed-user-ids`、`/server/session-name`、`/server/default-map`、`/server/max-players` |
 
-- `maps/the-island/config/`
-- `maps/the-island/saves/`
-- `maps/the-island/backups/`
-- `maps/the-island/runtime/`
+任意のSSM parameter:
 
-スタック名は `AsaFargateStack-maps-the-island`、自動停止スケジュール名は `asa-maps-the-island-auto-stop` になり、ロググループは `/asa/maps-the-island/...` 配下に移る。
+- `/server/enabled-maps`で選択可能なMapを制限する。共有Map registryを許可する場合は削除する。変更時は`pnpm run discord:register`を再実行する。
+- `/server/event-mod-id`でtask起動時に数値のCurseForge project IDを渡す。稼働中serverへ反映するには再起動する。
 
-## 非同期マップ転送
-
-マップ転送は、同じスタックが順番に起動したマップ間でのみサポートされる。1 つのスタックは同時に 1 つのマップだけを動かし、そのスタックがサポートする全マップは同じ ARK クラスター ID、S3 セーブアーカイブ、`ShooterGame/Saved/clusters` ディレクトリを共有する。`Saved` ディレクトリ全体が S3 にアーカイブされるため、アップロードしたサバイバー・生物・アイテムは、同じスタックから別のマップを起動したときに復元される。
-
-`resourcePrefix` は独立したサーバー環境の識別子であり、クラスターを共有するマップの識別子ではない。プレフィックスが異なればスタック・バケット・セーブアーカイブが別になり、`asaClusterId` を一致させてもスタックをまたぐ転送は意図的にサポートしない。The Island と別マップの間で転送したい場合は、1 つの `resourcePrefix` を使い続け、`/asa start map:<map>` で移動先を選ぶ。
-
-転送の流れ:
-
-1. オベリスクまたはトランスミッターでサバイバー・生物・アイテムをアップロードする。
-2. `/asa backup` を実行してバックアップ通知を待つか、サーバーをクリーンに停止する。
-3. 現在のマップを停止する。
-4. `/asa start map:<map>` で移動先のマップを起動する。
-5. 移動先のマップでアップロードしたデータをダウンロードする。
-
-クラスター ID のデフォルトは正規化した `resourcePrefix`、プレフィックスなしの場合は `asa-on-demand`。`-c asaClusterId=<stable-id>` で上書きできる。後から変更すると、既存の転送データは新しいクラスター ID からは見えなくなる。ID を一致させてもスタック間でセーブストレージを共有しないため、クロススタック転送はできない。
-
-## シークレットとパラメータ
-
-[scripts/put-secrets.example.sh](./scripts/put-secrets.example.sh) をテンプレートとして使う。実際のシークレットとローカルのサーバー設定は、gitignore 済みの `local/` ディレクトリに置く:
+任意のserver configurationはstate bucketへ置く。
 
 ```bash
-mkdir -p local
-cp scripts/put-secrets.example.sh local/put-secrets.sh
+aws s3 cp local/GameUserSettings.ini "s3://<AsaStateBucketName>/main/config/common/GameUserSettings.ini"
+aws s3 cp local/Game.ini "s3://<AsaStateBucketName>/main/config/common/Game.ini"
+aws s3 cp local/the-island/Game.ini "s3://<AsaStateBucketName>/main/config/maps/the-island/Game.ini"
 ```
 
-プレフィックス付きのマップ環境では、SSM パラメータと Secrets Manager のシークレットを対応するリソースプレフィックス配下に登録する:
+共通設定を先に、Map overlayを後から適用する。その後、password、port、session nameなどruntime所有の値を注入する。
+
+## 運用
+
+### サーバーイメージの更新
+
+新しいimmutable tagをbuild・pushする。
 
 ```bash
-RESOURCE_PREFIX=maps/the-island ./local/put-secrets.sh --profile my-aws-profile
-```
-
-`resourcePrefix` を設定すると、SSM パラメータと Secrets Manager のシークレットは `/asa/<resourcePrefix>` から読み込まれる。
-
-必須の Secrets Manager 値:
-
-- `/asa/<resourcePrefix>/discord/bot-token`
-- `/asa/<resourcePrefix>/discord/notification-webhook-url`
-- `/asa/<resourcePrefix>/server/password`
-- `/asa/<resourcePrefix>/server/admin-password`
-
-必須の SSM パラメータ:
-
-- `/asa/<resourcePrefix>/discord/application-id`
-- `/asa/<resourcePrefix>/discord/public-key`
-- `/asa/<resourcePrefix>/discord/guild-id`
-- `/asa/<resourcePrefix>/discord/allowed-role-ids`
-- `/asa/<resourcePrefix>/discord/allowed-user-ids`
-- `/asa/<resourcePrefix>/server/session-name`
-- `/asa/<resourcePrefix>/server/default-map`
-- `/asa/<resourcePrefix>/server/max-players`
-
-任意の SSM パラメータ:
-
-- `/asa/<resourcePrefix>/server/enabled-maps` — `TheIsland_WP,ScorchedEarth_WP` のようなカンマ区切りのマップ値。未設定なら共有許可リストの全マップを有効にする。SSM の String パラメータには空文字を設定できないため、制限を解除する場合はこのパラメータを削除する。変更または削除した後は `pnpm run discord:register` を再実行する。
-- `/asa/<resourcePrefix>/server/event-mod-id` — 起動する ASA イベント mod の CurseForge project ID。`/asa start` のたびに最新値を読み、`-mods=<ID>` として適用する。未設定、削除、または `None` ならイベント mod を指定しない。変更は稼働中のタスクには反映されないため、サーバーを停止してから再起動する。
-
-たとえば Summer Bash 2026 の公式案内にある Mod ID `927091` をプレフィックス付き環境へ設定する:
-
-```bash
-aws ssm put-parameter \
+./scripts/push-image.sh \
   --profile my-aws-profile \
-  --name /asa/maps/the-island/server/event-mod-id \
-  --type String \
-  --value 927091 \
-  --overwrite
+  --region ap-northeast-1 \
+  --resource-prefix main \
+  --build-id BUILD_ID
 ```
 
-イベントごとに有効化方法や Mod ID が変わる可能性があるため、設定時は Studio Wildcard の最新案内を確認する。
+その後、[初回デプロイ](#初回デプロイ)のfull deploy commandを、新しい`asaBuildId`で再実行する。その環境固有のほかのcontext値はすべて維持する。`asaUpdateOnStart=true`は緊急時のSteamCMD update用。通常はbuild・test済みimageを使う。
 
-プレフィックスなしのデフォルト環境では `resourcePrefix` を省略し、`/asa/discord/bot-token`、`/asa/server/default-map` のようになる。`resourcePrefix=maps/the-island` の場合は `/asa/maps/the-island/discord/bot-token`、`/asa/maps/the-island/server/default-map` のようになる。
+### コストと自動停止
 
-## Discord
+- Mapごとにidle timeoutとheartbeatを持つ。Heartbeatの欠落やstaleだけでは停止しない。
+- Lambda control planeが月間runtime-hours上限を適用し、保守的なcostとSpot costの見積もりを表示する。
+- AWS Budgetsのemail通知は`enableAwsBudget=true`と`budgetEmail`で任意に有効化する。
+- Fargate on-demand fallbackは`enableOnDemandFallback=true`を指定しない限り無効。
 
-Discord の Interactions Endpoint URL に CDK 出力 `DiscordInteractionsEndpointUrl` を設定する。
-
-ギルドコマンドの登録:
+## コマンド
 
 ```bash
-pnpm run discord:register \
-  --profile my-aws-profile \
-  --resourcePrefix maps/the-island
+pnpm run build                 # TypeScript check
+pnpm run check                 # Lint and formatting rules
+pnpm run test                  # Unit and CDK tests
+pnpm run synth                 # CloudFormation synthesis
+pnpm run smoke                 # Two-Map structural smoke test
+ASA_TEST_IMAGE=ACCOUNT.dkr.ecr.ap-northeast-1.amazonaws.com/REPOSITORY:BUILD_ID pnpm run test:container
 ```
 
-このスクリプトは bot トークンを Secrets Manager から、アプリケーション ID・ギルド ID と任意のマップ制限を SSM の `server/enabled-maps` から読み込む。従来どおり `DISCORD_BOT_TOKEN`、`DISCORD_APPLICATION_ID`、`DISCORD_GUILD_ID`、`ASA_ENABLED_MAPS` の環境変数で上書きもできる。
+## 関連ドキュメント
 
-## よく使うコマンド
-
-```bash
-pnpm run build
-pnpm run test
-pnpm run synth
-pnpm run smoke
-pnpm run image:push --profile my-aws-profile
-```
-
-## 現在の実装メモ
-
-- ECS タスクは `RunTask` で起動する。ECS Service は作らない。
-- VPC はパブリックサブネットのみで、NAT Gateway はない。
-- キャパシティプロバイダ戦略のデフォルトは Fargate Spot。`-c enableOnDemandFallback=true` を指定しない限りオンデマンドへのフォールバックは無効。
-- タスクサイズのデフォルトは 4 vCPU・24 GiB メモリ。
-- Discord の budget 出力は、保守的な見積もり(`hourlyCostJpy`、デフォルト 52 円/時)と Fargate Spot の変動見積もり(`spotHourlyCostJpy`、デフォルト 17 円/時)の両方を表示する。
-- `/asa start` に固定のセッション TTL はない。`idle_minutes` へ 1〜1440 分を指定でき、既定値は 30 分。時刻の異なる fresh な heartbeat がその時間連続して 0 人を示すと停止する。heartbeat の欠落や鮮度切れだけでは停止しない。稼働中に `monthlyRuntimeHoursLimit`(既定 80 時間)へ到達した場合も停止する。
-- ASA と UMU-Proton は `scripts/push-image.sh` の Docker イメージビルド時にインストールされる。CDK の synth / deploy は Docker を起動しない。
-- ASA のアップデートを取り込むには、まず `./scripts/push-image.sh --build-id 2026-07-05` を実行し、次に同じタグで `pnpm exec cdk deploy -c asaBuildId=2026-07-05` をデプロイする。タグが存在しない・一致しない場合、ECS タスクはイメージの pull エラーで停止する。
-- `-c asaUpdateOnStart=true` で、タスク起動のたびに SteamCMD で更新する緊急用モードを有効にできる。デフォルトは無効。
-- マップの選択肢は Lambda が検証し、共有の許可リストから登録される。任意の `server/enabled-maps` パラメータで環境ごとのサブセットに制限できる。共有リストまたはこのパラメータを変更したら `pnpm run discord:register` を再実行する。
-- ASA イベント mod は任意の `server/event-mod-id` パラメータで選ぶ。Lambda は起動ごとに値を読み、数値の project ID だけを ECS タスクへ渡し、コンテナが `-mods=<ID>` を起動引数へ追加する。選択中の ID は start/status/info と READY 通知に表示される。
-- 1 スタック内のマップ間転送は非同期方式: クラスターデータはそのスタックの S3 セーブアーカイブに含まれるが、複数マップを同時には動かさない。クロススタック転送はサポートしない。
-- Discord コマンドは即座に deferred 応答を返し、AWS 操作を非同期に実行して、結果を follow-up 応答で返す。準備完了やライフサイクルの通知は設定した Discord webhook に送られる。
-- ステートバケットはバージョニング有効で、非カレントのオブジェクトバージョンはライフサイクルルールにより 7 日で削除される。
-- スタックごとに専用の ECR リポジトリを持ち、最新 2 イメージのみ保持する。スタックの destroy 時にはイメージごと削除される。
+- [旧環境向けstorage migration・rollback runbook](./docs/parallel-map-transfer-runbook.ja.md) — 以前のsingle-save layoutで作成した環境だけが対象。新規deployにはmigration不要。
+- [Secret・parameterのexample](./scripts/put-secrets.example.sh)

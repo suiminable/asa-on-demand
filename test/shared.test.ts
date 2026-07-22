@@ -1,12 +1,22 @@
 import nacl from "tweetnacl";
 import { describe, expect, it } from "vitest";
-import { activeRuntimeSecondsThisMonth, canStart, hours, monthKey, splitRuntimeByJstMonth, startOfJstMonth } from "../src/shared/budget.js";
+import {
+  activeRuntimeSecondsThisMonth,
+  canStart,
+  currentMonthRuntimeSeconds,
+  hours,
+  monthKey,
+  splitRuntimeByJstMonth,
+  startOfJstMonth,
+} from "../src/shared/budget.js";
 import { normalizeConfigPrefix, parameterNamesFor, secretNamesFor } from "../src/shared/config.js";
 import { DEFAULT_IDLE_MINUTES, MAX_IDLE_MINUTES, MIN_IDLE_MINUTES } from "../src/shared/defaults.js";
 import { isAuthorized, verifyDiscordSignature } from "../src/shared/discord.js";
 import { connectCommandForIp, eniIdFromTask, taskStopReason } from "../src/shared/ecs.js";
 import { eventModLabel, parseEventModId } from "../src/shared/events.js";
-import { ASA_MAPS, isSupportedAsaMap, parseEnabledMaps } from "../src/shared/maps.js";
+import { parseReadyJson } from "../src/shared/heartbeat.js";
+import { ASA_MAPS, isSupportedAsaMap, mapByArkMapName, parseEnabledMaps, sessionNameFor } from "../src/shared/maps.js";
+import { mapStorageKeys, parseTaskGroup, stopScheduleName, taskGroup } from "../src/shared/resources.js";
 
 describe("Discord helpers", () => {
   it("verifies valid Ed25519 signatures", () => {
@@ -41,22 +51,14 @@ describe("Budget helpers", () => {
   });
 
   it("rejects starts only after the runtime limit has been reached", () => {
-    const budget = (runtimeSeconds: number) => ({
-      pk: "BUDGET#2026-06",
-      runtimeSeconds,
-      estimatedCostJpy: 0,
-      estimatedCostUsd: 0,
-      startCount: 0,
-      updatedAt: "",
-    });
     expect(
       canStart({
-        budget: budget(80 * 3600),
+        currentMonthRuntimeSeconds: 80 * 3600,
         monthlyRuntimeHoursLimit: 80,
       }).ok,
     ).toBe(false);
-    expect(canStart({ budget: budget(79 * 3600 + 3599), monthlyRuntimeHoursLimit: 80 }).ok).toBe(true);
-    expect(canStart({ budget: undefined, monthlyRuntimeHoursLimit: 80 }).ok).toBe(true);
+    expect(canStart({ currentMonthRuntimeSeconds: 79 * 3600 + 3599, monthlyRuntimeHoursLimit: 80 }).ok).toBe(true);
+    expect(canStart({ currentMonthRuntimeSeconds: 0, monthlyRuntimeHoursLimit: 80 }).ok).toBe(true);
   });
 
   it("calculates active runtime from the start of the JST month", () => {
@@ -70,6 +72,24 @@ describe("Budget helpers", () => {
       { budgetPk: "BUDGET#2026-07", runtimeSeconds: 3600 },
       { budgetPk: "BUDGET#2026-08", runtimeSeconds: 7200 },
     ]);
+  });
+
+  it("adds actual elapsed runtime for every active Map to settled runtime", () => {
+    const now = new Date("2026-07-17T01:00:00.000Z");
+    expect(
+      currentMonthRuntimeSeconds({
+        budget: {
+          pk: "BUDGET#2026-07",
+          runtimeSeconds: 60 * 60,
+          estimatedCostJpy: 0,
+          estimatedCostUsd: 0,
+          startCount: 2,
+          updatedAt: "",
+        },
+        activeTaskStartedAt: ["2026-07-17T00:30:00.000Z", "2026-07-17T00:45:00.000Z"],
+        now,
+      }),
+    ).toBe(105 * 60);
   });
 });
 
@@ -98,6 +118,25 @@ describe("ECS helpers", () => {
       "Essential container in task exited: OutOfMemoryError",
     );
     expect(taskStopReason(undefined, undefined)).toBe("unknown");
+  });
+});
+
+describe("runtime markers", () => {
+  it("accepts READY only for the current Map generation", () => {
+    const params = {
+      now: new Date("2026-07-19T00:05:00.000Z"),
+      startedAt: "2026-07-19T00:00:00.000Z",
+      runId: "run-island-12345678",
+      mapId: "the-island",
+    };
+    const current = JSON.stringify({ ...params, now: undefined, startedAt: undefined, readyAt: "2026-07-19T00:04:00.000Z" });
+    expect(parseReadyJson(current, params)?.readyAt).toBe("2026-07-19T00:04:00.000Z");
+    expect(
+      parseReadyJson(JSON.stringify({ runId: "old-run-12345678", mapId: "the-island", readyAt: "2026-07-19T00:04:00.000Z" }), params),
+    ).toBeUndefined();
+    expect(
+      parseReadyJson(JSON.stringify({ runId: params.runId, mapId: "scorched-earth", readyAt: "2026-07-19T00:04:00.000Z" }), params),
+    ).toBeUndefined();
   });
 });
 
@@ -132,17 +171,29 @@ describe("ASA event mods", () => {
 
 describe("ASA maps", () => {
   it("keeps Discord choices and server validation on the same allowlist", () => {
-    expect(ASA_MAPS).toContainEqual({ name: "The Island", value: "TheIsland_WP" });
-    expect(ASA_MAPS).toContainEqual({ name: "Genesis: Part 1", value: "Genesis_WP" });
+    expect(ASA_MAPS).toContainEqual(expect.objectContaining({ mapId: "the-island", name: "The Island", value: "TheIsland_WP" }));
+    expect(ASA_MAPS).toContainEqual(expect.objectContaining({ mapId: "genesis-1", name: "Genesis: Part 1", value: "Genesis_WP" }));
     expect(isSupportedAsaMap("Ragnarok_WP")).toBe(true);
     expect(isSupportedAsaMap("Genesis_WP")).toBe(true);
     expect(isSupportedAsaMap("Genesis2_WP")).toBe(false);
   });
 
+  it("maps stable identifiers to scoped resources and task generations", () => {
+    const definition = mapByArkMapName("TheIsland_WP");
+    expect(definition?.mapId).toBe("the-island");
+    if (!definition) throw new Error("The Island map is missing from the test registry.");
+    expect(sessionNameFor("private-asa", definition)).toBe("private-asa-island");
+    expect(mapStorageKeys("env/prod", "the-island").heartbeatKey).toBe("env/prod/maps/the-island/runtime/heartbeat.json");
+    expect(stopScheduleName("env/prod", "the-island")).toBe("asa-env-prod-the-island-auto-stop");
+    const group = taskGroup("the-island", "12345678abcdef");
+    expect(parseTaskGroup(group)).toEqual({ mapId: "the-island", runId: "12345678abcdef" });
+    expect(parseTaskGroup("service:unrelated")).toBeUndefined();
+  });
+
   it("parses comma-separated enabled maps and ignores whitespace and empty values", () => {
     expect(parseEnabledMaps("")).toEqual([]);
     expect(parseEnabledMaps("  ,  ")).toEqual([]);
-    expect(parseEnabledMaps(" TheIsland_WP, , ScorchedEarth_WP ")).toEqual(["TheIsland_WP", "ScorchedEarth_WP"]);
+    expect(parseEnabledMaps(" TheIsland_WP, , ScorchedEarth_WP, TheIsland_WP ")).toEqual(["TheIsland_WP", "ScorchedEarth_WP"]);
   });
 });
 

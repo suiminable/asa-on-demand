@@ -41,8 +41,17 @@ export function activeRuntimeSecondsThisMonth(startedAt: string | null | undefin
   return Math.max(0, Math.floor((now.getTime() - start) / 1000));
 }
 
-export function currentMonthRuntimeSeconds(params: { budget: BudgetState | undefined; taskStartedAt?: string | null; now?: Date }): number {
-  return (params.budget?.runtimeSeconds ?? 0) + activeRuntimeSecondsThisMonth(params.taskStartedAt, params.now ?? new Date());
+export function currentMonthRuntimeSeconds(params: {
+  budget: BudgetState | undefined;
+  activeTaskStartedAt?: ReadonlyArray<string | null | undefined>;
+  now?: Date;
+}): number {
+  const now = params.now ?? new Date();
+  const activeRuntime = (params.activeTaskStartedAt ?? []).reduce(
+    (total, startedAt) => total + activeRuntimeSecondsThisMonth(startedAt, now),
+    0,
+  );
+  return (params.budget?.runtimeSeconds ?? 0) + activeRuntime;
 }
 
 export interface RuntimeSlice {
@@ -75,11 +84,10 @@ export function splitRuntimeByJstMonth(startedAt: string | null | undefined, sto
 }
 
 export function canStart(params: {
-  budget: BudgetState | undefined;
+  currentMonthRuntimeSeconds: number;
   monthlyRuntimeHoursLimit: number;
 }): { ok: true } | { ok: false; reason: string } {
-  const runtimeSeconds = params.budget?.runtimeSeconds ?? 0;
-  const runtimeHours = runtimeSeconds / 3600;
+  const runtimeHours = params.currentMonthRuntimeSeconds / 3600;
   if (runtimeHours >= params.monthlyRuntimeHoursLimit) {
     return {
       ok: false,

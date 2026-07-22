@@ -1,6 +1,6 @@
-import { activeRuntimeSecondsThisMonth } from "./budget.js";
+import { currentMonthRuntimeSeconds as calculateCurrentMonthRuntimeSeconds } from "./budget.js";
 import { validHeartbeat } from "./heartbeat.js";
-import type { BudgetState, ServerState } from "./types.js";
+import type { BudgetState, MapServerState } from "./types.js";
 
 export type IdleCheckRule =
   | "NOT_RUNNING"
@@ -28,26 +28,30 @@ export interface IdleCheckDecision {
   currentMonthRuntimeSeconds: number;
 }
 
-function changedIdleState(state: ServerState, idleSince: string | null, lastHeartbeatAt: string | null): IdleStateUpdate | undefined {
+function changedIdleState(state: MapServerState, idleSince: string | null, lastHeartbeatAt: string | null): IdleStateUpdate | undefined {
   if ((state.idleSince ?? null) === idleSince && (state.lastHeartbeatAt ?? null) === lastHeartbeatAt) return undefined;
   return { idleSince, lastHeartbeatAt };
 }
 
 export function evaluateIdleCheck(params: {
-  state: ServerState | undefined;
+  state: MapServerState | undefined;
   heartbeat: unknown;
   budget: BudgetState | undefined;
+  activeTaskStartedAt: ReadonlyArray<string | null | undefined>;
   now: Date;
   monthlyRuntimeHoursLimit: number;
   heartbeatFreshnessSeconds: number;
 }): IdleCheckDecision {
   const { state, now } = params;
-  if (!state?.taskArn || (state.status !== "RUNNING" && state.status !== "STARTING")) {
-    return { action: "DELETE_SCHEDULE", rule: "NOT_RUNNING", currentMonthRuntimeSeconds: params.budget?.runtimeSeconds ?? 0 };
+  const currentMonthRuntimeSeconds = calculateCurrentMonthRuntimeSeconds({
+    budget: params.budget,
+    activeTaskStartedAt: params.activeTaskStartedAt,
+    now,
+  });
+  if (!state?.taskArn || !state.runId || (state.status !== "RUNNING" && state.status !== "STARTING")) {
+    return { action: "DELETE_SCHEDULE", rule: "NOT_RUNNING", currentMonthRuntimeSeconds };
   }
 
-  const activeRuntime = activeRuntimeSecondsThisMonth(state.taskStartedAt ?? state.startedAt, now);
-  const currentMonthRuntimeSeconds = (params.budget?.runtimeSeconds ?? 0) + activeRuntime;
   if (currentMonthRuntimeSeconds >= params.monthlyRuntimeHoursLimit * 3600) {
     return {
       action: "STOP",
@@ -65,6 +69,8 @@ export function evaluateIdleCheck(params: {
     now,
     startedAt: state.startedAt,
     freshnessSeconds: params.heartbeatFreshnessSeconds,
+    runId: state.runId,
+    mapId: state.mapId,
   });
   if (!heartbeat) {
     return {
