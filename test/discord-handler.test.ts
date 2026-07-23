@@ -182,7 +182,7 @@ beforeEach(async () => {
   mocks.parameters.set("/asa/server/session-name", "private-asa");
   mocks.parameters.set("/asa/server/default-map", "TheIsland_WP");
   mocks.parameters.set("/asa/server/enabled-maps", "TheIsland_WP,ScorchedEarth_WP");
-  mocks.parameters.set("/asa/server/max-players", "4");
+  mocks.parameters.set("/asa/server/max-players", "20");
   mocks.fetch.mockReset().mockResolvedValue({ ok: true });
   mocks.ecsSend.mockReset().mockResolvedValue({ tasks: [{ taskArn: "task-1" }] });
   mocks.lambdaSend.mockReset().mockResolvedValue({ StatusCode: 202 });
@@ -229,6 +229,7 @@ describe("Discord map control", () => {
           mapId: "scorched-earth",
           arkMapName: "ScorchedEarth_WP",
           idleTimeoutMinutes: 45,
+          maxPlayers: 20,
         }),
       }),
     );
@@ -252,12 +253,49 @@ describe("Discord map control", () => {
     expect(command.input.overrides.containerOverrides[0].environment).toEqual(
       expect.arrayContaining([
         { name: "ASA_MAP_ID", value: "scorched-earth" },
+        { name: "ASA_MAX_PLAYERS", value: "20" },
         { name: "S3_SAVE_KEY", value: "env/maps/scorched-earth/saves/current.tar.zst" },
         { name: "HEARTBEAT_KEY", value: "env/maps/scorched-earth/runtime/heartbeat.json" },
       ]),
     );
     const create = mocks.schedulerSend.mock.calls.map(([value]) => value).find((value) => value.input.ScheduleExpression);
     expect(JSON.parse(create.input.Target.Input)).toMatchObject({ mapId: "scorched-earth", expectedTaskArn: "task-1" });
+  });
+
+  it("accepts max_players up to 100", async () => {
+    await runAsync("start", [
+      { name: "map", value: "TheIsland_WP" },
+      { name: "max_players", value: 100 },
+      { name: "public_notify", value: false },
+    ]);
+
+    expect(mocks.claimMapStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: expect.objectContaining({ maxPlayers: 100 }),
+      }),
+    );
+    const command = mocks.ecsSend.mock.calls[0][0] as {
+      input: { overrides: { containerOverrides: Array<{ environment: Array<{ name: string; value: string }> }> } };
+    };
+    expect(command.input.overrides.containerOverrides[0].environment).toContainEqual({
+      name: "ASA_MAX_PLAYERS",
+      value: "100",
+    });
+  });
+
+  it("defaults max_players to 20 when the parameter is absent", async () => {
+    mocks.parameters.delete("/asa/server/max-players");
+
+    await runAsync("start", [
+      { name: "map", value: "TheIsland_WP" },
+      { name: "public_notify", value: false },
+    ]);
+
+    expect(mocks.claimMapStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: expect.objectContaining({ maxPlayers: 20 }),
+      }),
+    );
   });
 
   it("keeps the claimed task tracked until STOPPED settlement when post-launch schedule creation fails", async () => {

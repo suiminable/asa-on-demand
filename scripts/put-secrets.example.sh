@@ -59,4 +59,4 @@ aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/server/default-map" --type St
 # Optional: activate an ASA event mod by CurseForge project ID. Use None or delete the parameter to disable it.
 # Summer Bash 2026: 927091
 # aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/server/event-mod-id" --type String --value '927091'
-aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/server/max-players" --type String --value '4'
+aws_cli ssm put-parameter --name "${CONFIG_PREFIX}/server/max-players" --type String --value '20'
