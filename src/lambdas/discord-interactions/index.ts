@@ -214,7 +214,7 @@ async function handleStart(interaction: DiscordInteraction) {
   } catch (error) {
     return message(`Configured event-mod-id is invalid: ${error instanceof Error ? error.message : String(error)}.`, true);
   }
-  const configuredMaxPlayers = Number(await getParameter(parameterNames.maxPlayers, "4"));
+  const configuredMaxPlayers = Number(await getParameter(parameterNames.maxPlayers, String(DEFAULT_MAX_PLAYERS)));
   if (!optionValue<number>(interaction, "max_players") && Number.isFinite(configuredMaxPlayers)) {
     maxPlayers = Math.min(Math.max(configuredMaxPlayers, 1), MAX_PLAYERS);
   }

@@ -8,6 +8,7 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import type * as s3 from "aws-cdk-lib/aws-s3";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import type { Construct } from "constructs";
+import { DEFAULT_MAX_PLAYERS } from "../shared/defaults.js";
 import { mapStorageKeys } from "../shared/resources.js";
 
 export interface AsaComputeProps {
@@ -122,7 +123,7 @@ export function createAsaCompute(scope: Construct, props: AsaComputeProps): AsaC
       ASA_MAP: "TheIsland_WP",
       ASA_RUN_ID: "task-definition-default",
       ASA_SESSION_NAME: "private-asa",
-      ASA_MAX_PLAYERS: "4",
+      ASA_MAX_PLAYERS: String(DEFAULT_MAX_PLAYERS),
       ASA_PORT: "7777",
       ASA_RCON_PORT: "27020",
       ASA_CLUSTER_ID: props.asaClusterId,

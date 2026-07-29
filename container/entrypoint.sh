@@ -128,7 +128,14 @@ rm -f "${ASA_INSTALL_DIR}/ShooterGame/Binaries/Win64/steamclient64.dll"
 cluster_dir_windows="Z:${cluster_dir//\//\\}"
 
 launch_arg="${ASA_MAP}?listen?Port=${ASA_PORT}"
-extra_args=(-log "-WinLiveMaxPlayers=${ASA_MAX_PLAYERS}" "-clusterid=${ASA_CLUSTER_ID}" "-ClusterDirOverride=${cluster_dir_windows}" -NoTransferFromFiltering)
+extra_args=(
+  -log
+  "-WinLiveMaxPlayers=${ASA_MAX_PLAYERS}"
+  "-clusterid=${ASA_CLUSTER_ID}"
+  "-ClusterDirOverride=${cluster_dir_windows}"
+  -NoTransferFromFiltering
+  -ForceClampItemQuality
+)
 if [[ -n "${ASA_EVENT_MOD_ID:-}" ]]; then
   extra_args+=("-mods=${ASA_EVENT_MOD_ID}")
 fi
