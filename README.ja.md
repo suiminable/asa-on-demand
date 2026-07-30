@@ -251,6 +251,14 @@ aws s3 cp local/the-island/Game.ini "s3://<AsaStateBucketName>/main/config/maps/
 
 その後、[初回デプロイ](#初回デプロイ)のfull deploy commandを、新しい`asaBuildId`で再実行する。その環境固有のほかのcontext値はすべて維持する。`asaUpdateOnStart=true`は緊急時のSteamCMD update用。通常はbuild・test済みimageを使う。
 
+### SaveとMap backup
+
+- `SaveWorld`は10分ごとに実行し、重いarchive処理から分離する。
+- Full Map backupは、前回から30分以上経過してserverが無人なら実行する。Playerが残り続ける場合も60分で実行する。
+- 手動の`/asa backup`は直前に`SaveWorld`を実行する。停止時はserver processの終了後にfinal backupを作成する。
+- `Saved/Logs`、`Saved/Crashes`、`Saved/Profiling`、`Saved/Screenshots`、Cross-ARK用`Saved/clusters`、runtime注入済みconfigはMap archiveへ含めない。
+- 圧縮はCPU・I/Oとも低優先度で実行する。Archiveはdated keyへ1回だけuploadし、`saves/current.tar.zst`はS3内copyで更新する。
+
 ### コストと自動停止
 
 - Mapごとにidle timeoutとheartbeatを持つ。Heartbeatの欠落やstaleだけでは停止しない。

@@ -53,6 +53,7 @@ fi
 mkdir -p /asa/server /asa/work /asa/tmp /asa/scripts
 
 asa_pid=""
+save_loop_pid=""
 backup_loop_pid=""
 request_loop_pid=""
 heartbeat_loop_pid=""
@@ -66,10 +67,21 @@ notify() {
 }
 
 run_backup() {
-  SKIP_RCON_SAVE="${1:-false}" /asa/scripts/backup.sh || notify "ASA backup failed at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+  if SKIP_RCON_SAVE="${1:-false}" /asa/scripts/backup.sh; then
+    return 0
+  fi
+  notify "ASA backup failed at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+  return 1
+}
+
+player_count() {
+  local players
+  players="$(/asa/scripts/rcon.py ListPlayers 2>/dev/null)" || return 1
+  grep -c '^[0-9]\+\.' <<<"${players}" || true
 }
 
 stop_background_loops() {
+  if [[ -n "${save_loop_pid}" ]]; then kill "${save_loop_pid}" 2>/dev/null || true; fi
   if [[ -n "${backup_loop_pid}" ]]; then kill "${backup_loop_pid}" 2>/dev/null || true; fi
   if [[ -n "${request_loop_pid}" ]]; then kill "${request_loop_pid}" 2>/dev/null || true; fi
   if [[ -n "${heartbeat_loop_pid}" ]]; then kill "${heartbeat_loop_pid}" 2>/dev/null || true; fi
@@ -95,7 +107,7 @@ shutdown() {
     fi
     kill -KILL "${asa_pid}" 2>/dev/null || true
   fi
-  run_backup true
+  run_backup true || true
 }
 
 trap shutdown SIGTERM SIGINT
@@ -166,10 +178,49 @@ echo "Starting ASA server..."
 asa_pid="$!"
 
 (
-  interval="${AUTO_BACKUP_INTERVAL_SECONDS:-600}"
+  interval="${AUTO_SAVE_INTERVAL_SECONDS:-600}"
   while true; do
     sleep "${interval}"
-    run_backup
+    /asa/scripts/rcon.py SaveWorld || notify "ASA automatic SaveWorld failed at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+  done
+) &
+save_loop_pid="$!"
+
+(
+  min_interval="${AUTO_BACKUP_MIN_INTERVAL_SECONDS:-1800}"
+  max_interval="${AUTO_BACKUP_MAX_INTERVAL_SECONDS:-3600}"
+  check_interval="${AUTO_BACKUP_CHECK_INTERVAL_SECONDS:-60}"
+  backup_marker="${BACKUP_COMPLETION_MARKER:-${ASA_TMP_ROOT:-/asa/tmp}/last-backup.completed}"
+  mkdir -p "$(dirname "${backup_marker}")"
+  if [[ ! -e "${backup_marker}" ]]; then
+    touch "${backup_marker}"
+  fi
+  while true; do
+    sleep "${check_interval}"
+    now="$(date +%s)"
+    last_backup_at="$(stat -c %Y "${backup_marker}" 2>/dev/null || printf '%s' "${now}")"
+    elapsed=$(( now - last_backup_at ))
+    if (( elapsed < min_interval )); then
+      continue
+    fi
+
+    reason=""
+    if (( elapsed >= max_interval )); then
+      reason="maximum interval reached"
+    else
+      count="$(player_count)" || continue
+      if (( count == 0 )); then
+        reason="server is empty"
+      fi
+    fi
+    if [[ -z "${reason}" ]]; then
+      continue
+    fi
+
+    echo "Starting automatic full backup: ${reason}."
+    # SaveWorld has its own 10-minute cadence. Avoid coupling another save
+    # pause to the heavier snapshot/compression/upload path.
+    run_backup true || true
   done
 ) &
 backup_loop_pid="$!"
@@ -183,7 +234,7 @@ backup_loop_pid="$!"
     requested_run_id="$(jq -r '.runId // empty' <<<"${request}" 2>/dev/null || true)"
     if [[ "${requested_run_id}" == "${ASA_RUN_ID}" && -n "${requested_at}" && "${requested_at}" != "${last_seen}" ]]; then
       last_seen="${requested_at}"
-      run_backup
+      run_backup || true
     fi
     sleep 30
   done
@@ -194,8 +245,7 @@ request_loop_pid="$!"
   key="${HEARTBEAT_KEY}"
   while true; do
     sleep 60
-    players="$(/asa/scripts/rcon.py ListPlayers 2>/dev/null)" || continue
-    count="$(grep -c '^[0-9]\+\.' <<<"${players}" || true)"
+    count="$(player_count)" || continue
     printf '{"playerCount": %d, "updatedAt": "%s", "runId": "%s", "mapId": "%s"}\n' \
       "${count}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${ASA_RUN_ID}" "${ASA_MAP_ID}" \
       | aws s3 cp - "s3://${S3_BUCKET}/${key}" --content-type application/json || true
@@ -239,5 +289,5 @@ cluster_watchdog_pid="$!"
 exit_code=0
 wait "${asa_pid}" || exit_code="$?"
 stop_background_loops
-if [[ "${stopping}" != "true" ]]; then run_backup true; fi
+if [[ "${stopping}" != "true" ]]; then run_backup true || true; fi
 exit "${exit_code}"

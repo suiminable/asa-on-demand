@@ -251,6 +251,14 @@ Build and push a new immutable tag:
 
 Then repeat the full deploy command from [First Deployment](#first-deployment) with the new `asaBuildId`. Keep every other environment-specific context value unchanged. `asaUpdateOnStart=true` exists for emergency SteamCMD updates, but the normal path is a baked and tested image.
 
+### Saves and Map Backups
+
+- `SaveWorld` runs every 10 minutes independently of the heavier archive path.
+- A full Map backup runs after 30 minutes when the server is empty, or at 60 minutes even if players remain.
+- A manual `/asa backup` performs `SaveWorld` first. Shutdown creates its final backup after the server process exits.
+- Map archives exclude `Saved/Logs`, `Saved/Crashes`, `Saved/Profiling`, `Saved/Screenshots`, Cross-ARK `Saved/clusters`, and runtime-injected configuration.
+- Compression runs at low CPU and I/O priority. The archive is uploaded once to its dated key, then `saves/current.tar.zst` is updated with an S3-side copy.
+
 ### Cost and Automatic Stop
 
 - Every Map has its own idle timeout and heartbeat. Missing or stale heartbeats do not trigger a stop.

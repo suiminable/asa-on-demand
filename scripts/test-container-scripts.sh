@@ -18,7 +18,7 @@ timeout "${ASA_CONTAINER_TEST_TIMEOUT_SECONDS:-900}" docker run --rm \
   --entrypoint bash \
   --mount "type=bind,src=${repo_root},dst=/workspace,readonly" \
   "${image}" \
-  /workspace/test/container-scripts.test.sh
+  -c '/workspace/test/backup-script.test.sh && /workspace/test/container-scripts.test.sh'
 
 failure_log="$(mktemp /tmp/asa-entrypoint-no-efs.XXXXXX)"
 cleanup() {
