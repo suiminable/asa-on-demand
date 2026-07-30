@@ -222,7 +222,7 @@ for map_id in the-island scorched-earth; do
   aws_log="${work_root}/backup-aws-${map_id}.log"
   [[ "$(grep -Ec '^s3 cp .*/current-[0-9TZ]+\.tar\.zst s3://' "${aws_log}")" == "1" ]] \
     || fail "backup for ${map_id} uploaded its local archive more than once"
-  grep -Eq '^s3 cp s3://.*/backups/.+\.tar\.zst s3://.*/saves/current\.tar\.zst --no-progress[[:space:]]*$' "${aws_log}" \
+  grep -Eq '^s3 cp s3://.*/backups/.+\.tar\.zst s3://.*/saves/current\.tar\.zst --copy-props none --no-progress[[:space:]]*$' "${aws_log}" \
     || fail "backup for ${map_id} did not create current.tar.zst with an S3-side copy"
   extracted="${work_root}/backup-extract-${map_id}"
   mkdir -p "${extracted}"

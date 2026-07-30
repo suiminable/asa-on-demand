@@ -37,6 +37,12 @@ mkdir -p \
   "${saved_root}/Profiling" \
   "${saved_root}/Screenshots"
 ln -s "${repo_root}/test/fixtures/fake-aws.sh" "${fake_bin}/aws"
+if ! command -v zstd >/dev/null 2>&1; then
+  ln -s "${repo_root}/test/fixtures/fake-zstd.sh" "${fake_bin}/zstd"
+fi
+if ! command -v jq >/dev/null 2>&1; then
+  ln -s "${repo_root}/test/fixtures/fake-jq.mjs" "${fake_bin}/jq"
+fi
 
 printf 'world\n' >"${saved_root}/SavedArks/world.ark"
 printf 'cluster\n' >"${saved_root}/clusters/transfer.dat"
@@ -90,11 +96,82 @@ if tar --zstd -tf "${current_archive}" | grep -Eq '^Saved/Config/WindowsServer/(
 fi
 [[ "$(grep -Ec '^s3 cp .*/current-[0-9TZ]+\.tar\.zst s3://' "${aws_log}")" == "1" ]] \
   || fail "local archive was uploaded more than once"
-grep -Eq '^s3 cp s3://.*/backups/.+\.tar\.zst s3://.*/saves/current\.tar\.zst --no-progress[[:space:]]*$' "${aws_log}" \
+grep -Eq '^s3 cp s3://.*/backups/.+\.tar\.zst s3://.*/saves/current\.tar\.zst --copy-props none --no-progress[[:space:]]*$' "${aws_log}" \
   || fail "stable key was not created by an S3-side copy"
-[[ -f "${tmp_root}/last-backup.completed" ]] || fail "completion marker is missing"
+[[ -f "${tmp_root}/last-archive.completed" ]] || fail "archive completion marker is missing"
 jq -e \
-  '.runId == "run-astraeos-12345678" and (.key | startswith("fixture/maps/astraeos/backups/"))' \
+  '.runId == "run-astraeos-12345678"
+    and (.key | startswith("fixture/maps/astraeos/backups/"))
+    and (.backupAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+    and .promotedAt == .lastBackupAt' \
   "${fake_s3}/${bucket}/${prefix}runtime/last-backup.json" >/dev/null
+
+failure_prefix="fixture/maps/promotion-failure/"
+failure_tmp_root="${work_root}/failure-tmp"
+failure_aws_log="${work_root}/failure-aws.log"
+failure_state="${work_root}/failure-count"
+if env \
+  S3_BUCKET="${bucket}" \
+  S3_SAVE_KEY="${failure_prefix}saves/current.tar.zst" \
+  S3_BACKUP_PREFIX="${failure_prefix}backups/" \
+  S3_RUNTIME_PREFIX="${failure_prefix}runtime/" \
+  ASA_INSTALL_DIR="${install_root}" \
+  ASA_RUN_ID=run-promotion-failure-12345678 \
+  ASA_TMP_ROOT="${failure_tmp_root}" \
+  SKIP_RCON_SAVE=true \
+  BACKUP_QUIESCE_INTERVAL_SECONDS=0 \
+  BACKUP_QUIESCE_TIMEOUT_SECONDS=1 \
+  BACKUP_PROMOTION_MAX_ATTEMPTS=3 \
+  BACKUP_PROMOTION_RETRY_INITIAL_SECONDS=0 \
+  FAKE_AWS_LOG="${failure_aws_log}" \
+  FAKE_AWS_FAIL_CURRENT_COPY_ATTEMPTS=3 \
+  FAKE_AWS_FAILURE_STATE="${failure_state}" \
+  bash "${repo_root}/container/backup.sh"; then
+  fail "backup unexpectedly succeeded when every current promotion failed"
+fi
+[[ -f "${failure_tmp_root}/last-archive.completed" ]] \
+  || fail "archive completion marker was not updated after the dated upload"
+[[ -n "$(find "${fake_s3}/${bucket}/${failure_prefix}backups" -type f -name '*.tar.zst' -print -quit)" ]] \
+  || fail "dated archive was lost when current promotion failed"
+[[ ! -e "${fake_s3}/${bucket}/${failure_prefix}saves/current.tar.zst" ]] \
+  || fail "current archive exists despite all promotion attempts failing"
+[[ ! -e "${fake_s3}/${bucket}/${failure_prefix}runtime/last-backup.json" ]] \
+  || fail "last-backup metadata was published before current promotion succeeded"
+[[ "$(grep -Ec '^s3 cp .*/current-[0-9TZ]+\.tar\.zst s3://' "${failure_aws_log}")" == "1" ]] \
+  || fail "promotion retries uploaded the local archive more than once"
+[[ "$(grep -Ec '^s3 cp s3://.*/backups/.+\.tar\.zst s3://.*/saves/current\.tar\.zst --copy-props none --no-progress' "${failure_aws_log}")" == "3" ]] \
+  || fail "current promotion did not use the configured retry count"
+
+stale_prefix="fixture/maps/stale-promotion/"
+stale_tmp_root="${work_root}/stale-tmp"
+stale_aws_log="${work_root}/stale-aws.log"
+stale_current="${fake_s3}/${bucket}/${stale_prefix}saves/current.tar.zst"
+stale_metadata="${fake_s3}/${bucket}/${stale_prefix}runtime/last-backup.json"
+mkdir -p "$(dirname "${stale_current}")" "$(dirname "${stale_metadata}")"
+printf 'newer-current\n' >"${stale_current}"
+printf \
+  '{"lastBackupAt":"9999-12-31T23:59:59Z","backupAt":"9999-12-31T23:59:59Z","promotedAt":"9999-12-31T23:59:59Z","key":"%s","runId":"newer-run"}\n' \
+  "${stale_prefix}backups/9999/12/31/99991231T235959Z.tar.zst" \
+  >"${stale_metadata}"
+env \
+  S3_BUCKET="${bucket}" \
+  S3_SAVE_KEY="${stale_prefix}saves/current.tar.zst" \
+  S3_BACKUP_PREFIX="${stale_prefix}backups/" \
+  S3_RUNTIME_PREFIX="${stale_prefix}runtime/" \
+  ASA_INSTALL_DIR="${install_root}" \
+  ASA_RUN_ID=run-stale-promotion-12345678 \
+  ASA_TMP_ROOT="${stale_tmp_root}" \
+  SKIP_RCON_SAVE=true \
+  BACKUP_QUIESCE_INTERVAL_SECONDS=0 \
+  BACKUP_QUIESCE_TIMEOUT_SECONDS=1 \
+  FAKE_AWS_LOG="${stale_aws_log}" \
+  bash "${repo_root}/container/backup.sh"
+grep -Fqx 'newer-current' "${stale_current}" \
+  || fail "a stale promotion overwrote the newer current archive"
+jq -e '.runId == "newer-run"' "${stale_metadata}" >/dev/null \
+  || fail "a stale promotion overwrote newer last-backup metadata"
+if grep -Eq '^s3 cp s3://.*/backups/.+\.tar\.zst s3://.*/saves/current\.tar\.zst --copy-props none' "${stale_aws_log}"; then
+  fail "a stale backup attempted to promote over a newer backup"
+fi
 
 echo "Backup script assertions passed."

@@ -190,7 +190,7 @@ save_loop_pid="$!"
   min_interval="${AUTO_BACKUP_MIN_INTERVAL_SECONDS:-1800}"
   max_interval="${AUTO_BACKUP_MAX_INTERVAL_SECONDS:-3600}"
   check_interval="${AUTO_BACKUP_CHECK_INTERVAL_SECONDS:-60}"
-  backup_marker="${BACKUP_COMPLETION_MARKER:-${ASA_TMP_ROOT:-/asa/tmp}/last-backup.completed}"
+  backup_marker="${BACKUP_ARCHIVE_COMPLETION_MARKER:-${BACKUP_COMPLETION_MARKER:-${ASA_TMP_ROOT:-/asa/tmp}/last-archive.completed}}"
   mkdir -p "$(dirname "${backup_marker}")"
   if [[ ! -e "${backup_marker}" ]]; then
     touch "${backup_marker}"

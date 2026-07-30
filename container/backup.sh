@@ -12,13 +12,28 @@ tmp_root="${ASA_TMP_ROOT:-/asa/tmp}"
 scripts_root="${ASA_SCRIPTS_DIR:-/asa/scripts}"
 mkdir -p "${tmp_root}"
 lock_file="${BACKUP_LOCK_FILE:-${tmp_root%/}/backup.lock}"
-completion_marker="${BACKUP_COMPLETION_MARKER:-${tmp_root%/}/last-backup.completed}"
+archive_completion_marker="${BACKUP_ARCHIVE_COMPLETION_MARKER:-${BACKUP_COMPLETION_MARKER:-${tmp_root%/}/last-archive.completed}}"
+promotion_max_attempts="${BACKUP_PROMOTION_MAX_ATTEMPTS:-3}"
+promotion_retry_seconds="${BACKUP_PROMOTION_RETRY_INITIAL_SECONDS:-2}"
+if [[ ! "${promotion_max_attempts}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "BACKUP_PROMOTION_MAX_ATTEMPTS must be a positive integer." >&2
+  exit 2
+fi
+if [[ ! "${promotion_retry_seconds}" =~ ^[0-9]+$ ]]; then
+  echo "BACKUP_PROMOTION_RETRY_INITIAL_SECONDS must be a non-negative integer." >&2
+  exit 2
+fi
 exec 9>"${lock_file}"
 if ! flock -n 9; then
   echo "Another full backup is already in progress; skipping duplicate request."
   exit 0
 fi
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+backup_at="$(
+  printf '%s-%s-%sT%s:%s:%sZ\n' \
+    "${timestamp:0:4}" "${timestamp:4:2}" "${timestamp:6:2}" \
+    "${timestamp:9:2}" "${timestamp:11:2}" "${timestamp:13:2}"
+)"
 dated_path="$(date -u +%Y/%m/%d)/${timestamp}.tar.zst"
 dated_key="${S3_BACKUP_PREFIX}${dated_path}"
 archive="${tmp_root%/}/current-${timestamp}.tar.zst"
@@ -96,8 +111,56 @@ nice -n "${BACKUP_NICE_LEVEL:-15}" ionice -c 3 tar --zstd -cf "${archive}" -C "$
 # Upload the archive through the task ENI once. The stable restore key is then
 # created by an S3-side copy, so the same archive does not cross the ENI twice.
 aws s3 cp "${archive}" "s3://${S3_BUCKET}/${dated_key}" --no-progress
-aws s3 cp "s3://${S3_BUCKET}/${dated_key}" "s3://${S3_BUCKET}/${S3_SAVE_KEY}" --no-progress
-jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg key "${dated_key}" --arg runId "${ASA_RUN_ID}" \
-  '{lastBackupAt: $at, key: $key, runId: $runId}' \
-  | aws s3 cp - "s3://${S3_BUCKET}/${S3_RUNTIME_PREFIX}last-backup.json" --content-type application/json --no-progress
-touch "${completion_marker}"
+# The scheduler tracks completion of this expensive snapshot/upload stage.
+# Promotion failures must not cause it to recompress and upload the same save
+# every time the scheduler checks again.
+touch "${archive_completion_marker}"
+
+# Do not copy tags or metadata. The archive has no restore-relevant object
+# properties, and `--copy-props none` avoids extra GetObjectTagging and
+# PutObjectTagging calls. Retry only this S3-side promotion, never the upload.
+last_backup_uri="s3://${S3_BUCKET}/${S3_RUNTIME_PREFIX}last-backup.json"
+promoted_backup_key() {
+  aws s3 cp "${last_backup_uri}" - --no-progress 2>/dev/null \
+    | jq -r '.key // empty' 2>/dev/null \
+    || true
+}
+
+promotion_attempt=1
+while true; do
+  # A retry from an older task must never overwrite a backup that a newer task
+  # has already promoted. Keys are UTC timestamps in lexicographic order.
+  already_promoted_key="$(promoted_backup_key)"
+  if [[
+    "${already_promoted_key}" == "${S3_BACKUP_PREFIX}"* &&
+    ( "${already_promoted_key}" == "${dated_key}" || "${already_promoted_key}" > "${dated_key}" )
+  ]]; then
+    echo "Skipping stale promotion for ${dated_key}; ${already_promoted_key} is already current."
+    exit 0
+  fi
+
+  if aws s3 cp \
+    "s3://${S3_BUCKET}/${dated_key}" \
+    "s3://${S3_BUCKET}/${S3_SAVE_KEY}" \
+    --copy-props none \
+    --no-progress; then
+    break
+  fi
+  if (( promotion_attempt >= promotion_max_attempts )); then
+    echo "Failed to promote ${dated_key} after ${promotion_attempt} attempts; the dated backup is safe in S3." >&2
+    exit 1
+  fi
+  echo "Failed to promote ${dated_key}; retrying in ${promotion_retry_seconds}s." >&2
+  sleep "${promotion_retry_seconds}"
+  promotion_attempt=$(( promotion_attempt + 1 ))
+  promotion_retry_seconds=$(( promotion_retry_seconds * 2 ))
+done
+
+promoted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+jq -n \
+  --arg backupAt "${backup_at}" \
+  --arg promotedAt "${promoted_at}" \
+  --arg key "${dated_key}" \
+  --arg runId "${ASA_RUN_ID}" \
+  '{lastBackupAt: $promotedAt, backupAt: $backupAt, promotedAt: $promotedAt, key: $key, runId: $runId}' \
+  | aws s3 cp - "${last_backup_uri}" --content-type application/json --no-progress

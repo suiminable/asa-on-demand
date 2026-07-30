@@ -92,6 +92,24 @@ fi
 if [[ "${1:-}" == "s3" && "${2:-}" == "cp" ]]; then
   source_value="${3:?fake aws s3 cp requires a source}"
   destination_value="${4:?fake aws s3 cp requires a destination}"
+  if [[
+    "${source_value}" == s3://*/backups/*.tar.zst &&
+    "${destination_value}" == s3://*/saves/current.tar.zst &&
+    "${FAKE_AWS_FAIL_CURRENT_COPY_ATTEMPTS:-0}" =~ ^[0-9]+$ &&
+    "${FAKE_AWS_FAIL_CURRENT_COPY_ATTEMPTS:-0}" -gt 0
+  ]]; then
+    failure_state="${FAKE_AWS_FAILURE_STATE:-${FAKE_S3_ROOT%/}/.current-copy-failures}"
+    failure_count=0
+    if [[ -f "${failure_state}" ]]; then
+      failure_count="$(<"${failure_state}")"
+    fi
+    if (( failure_count < FAKE_AWS_FAIL_CURRENT_COPY_ATTEMPTS )); then
+      mkdir -p "$(dirname "${failure_state}")"
+      printf '%d\n' "$(( failure_count + 1 ))" >"${failure_state}"
+      echo "Simulated current promotion failure." >&2
+      exit 1
+    fi
+  fi
   if [[ "${source_value}" == s3://* ]]; then source_value="$(s3_path "${source_value}")"; fi
   if [[ "${destination_value}" == s3://* ]]; then destination_value="$(s3_path "${destination_value}")"; fi
 
