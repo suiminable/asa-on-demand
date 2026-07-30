@@ -135,6 +135,7 @@ extra_args=(
   "-ClusterDirOverride=${cluster_dir_windows}"
   -NoTransferFromFiltering
   -ForceClampItemQuality
+  -EnableIdlePlayerKick
 )
 if [[ -n "${ASA_EVENT_MOD_ID:-}" ]]; then
   extra_args+=("-mods=${ASA_EVENT_MOD_ID}")
