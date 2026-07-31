@@ -45,6 +45,14 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 printf 'world\n' >"${saved_root}/SavedArks/world.ark"
+printf 'player\n' >"${saved_root}/SavedArks/player.arkprofile"
+printf 'tribe\n' >"${saved_root}/SavedArks/1234.arktribe"
+printf 'dated-world-backup\n' >"${saved_root}/SavedArks/world_30.07.2026_10.46.28.ark"
+printf 'rollback-backup\n' >"${saved_root}/SavedArks/world_30.07.2026_10.46.18.arkrbf"
+printf 'anti-corruption-backup\n' >"${saved_root}/SavedArks/world_AntiCorruptionBackup.bak"
+printf 'new-launch-backup\n' >"${saved_root}/SavedArks/world_NewLaunchBackup.bak"
+printf 'player-backup\n' >"${saved_root}/SavedArks/player.profilebak"
+printf 'tribe-backup\n' >"${saved_root}/SavedArks/1234.tribebak"
 printf 'cluster\n' >"${saved_root}/clusters/transfer.dat"
 printf 'secret\n' >"${saved_root}/Config/WindowsServer/GameUserSettings.ini"
 printf 'runtime\n' >"${saved_root}/Config/WindowsServer/Game.ini"
@@ -88,8 +96,14 @@ dated_archive="$(find "${fake_s3}/${bucket}/${prefix}backups" -type f -name '*.t
 [[ -n "${dated_archive}" ]] || fail "dated archive is missing"
 cmp "${dated_archive}" "${current_archive}" || fail "S3-side copy differs from the dated archive"
 tar --zstd -tf "${current_archive}" | grep -Fqx 'Saved/SavedArks/world.ark' || fail "world save is missing"
+tar --zstd -tf "${current_archive}" | grep -Fqx 'Saved/SavedArks/player.arkprofile' || fail "player save is missing"
+tar --zstd -tf "${current_archive}" | grep -Fqx 'Saved/SavedArks/1234.arktribe' || fail "tribe save is missing"
 if tar --zstd -tf "${current_archive}" | grep -Eq '^Saved/(clusters|Logs|Crashes|Profiling|Screenshots)(/|$)'; then
   fail "archive contains excluded runtime data"
+fi
+if tar --zstd -tf "${current_archive}" \
+  | grep -Eq '(_AntiCorruptionBackup\.bak|_NewLaunchBackup\.bak|\.arkrbf|\.profilebak|\.tribebak|_[0-9]{2}\.[0-9]{2}\.[0-9]{4}_[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.ark)$'; then
+  fail "archive contains ASA internal rollback data"
 fi
 if tar --zstd -tf "${current_archive}" | grep -Eq '^Saved/Config/WindowsServer/(GameUserSettings.ini|Game.ini)$'; then
   fail "archive contains runtime-injected configuration"

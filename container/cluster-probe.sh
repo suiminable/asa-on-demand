@@ -8,6 +8,6 @@ renamed_file="${source_file}.renamed"
 
 mountpoint -q "${cluster_dir}"
 printf '%s\n' "${probe_id}" >"${source_file}"
-grep -Fxq "${probe_id}" "${source_file}"
+grep -Fxq -- "${probe_id}" "${source_file}"
 mv "${source_file}" "${renamed_file}"
 rm -f "${renamed_file}"

@@ -257,6 +257,7 @@ Then repeat the full deploy command from [First Deployment](#first-deployment) w
 - A full Map backup runs after 30 minutes when the server is empty, or at 60 minutes even if players remain.
 - A manual `/asa backup` performs `SaveWorld` first. Shutdown creates its final backup after the server process exits.
 - Map archives exclude `Saved/Logs`, `Saved/Crashes`, `Saved/Profiling`, `Saved/Screenshots`, Cross-ARK `Saved/clusters`, and runtime-injected configuration.
+- ASA rollback data such as timestamped world copies, `*.arkrbf`, `*_AntiCorruptionBackup.bak`, `*_NewLaunchBackup.bak`, `*.profilebak`, and `*.tribebak` is excluded from Map archives. The live world, player, and tribe data remains included.
 - Compression runs at low CPU and I/O priority. The archive is uploaded once to its dated key, then `saves/current.tar.zst` is updated with an S3-side copy.
 
 ### Cost and Automatic Stop

@@ -273,6 +273,16 @@ mkdir -p "${normal_directory}"
 if ASA_CLUSTER_DIR="${normal_directory}" bash "${repo_root}/container/cluster-probe.sh" >/dev/null 2>&1; then
   fail "cluster probe accepted an ordinary directory"
 fi
+if ! (
+  mountpoint() {
+    return 0
+  }
+  export -f mountpoint
+  ASA_CLUSTER_DIR="${normal_directory}" ASA_RUN_ID="-leading-hyphen-run-id" \
+    bash "${repo_root}/container/cluster-probe.sh"
+); then
+  fail "cluster probe rejected a run ID starting with a hyphen"
+fi
 if env "${migration_env[@]}" ASA_CLUSTER_ID='../escape' bash "${repo_root}/container/migrate-storage.sh" migrate-parallel >/dev/null 2>&1; then
   fail "migration accepted a path-traversing cluster ID"
 fi

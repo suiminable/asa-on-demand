@@ -91,11 +91,13 @@ stop_background_loops() {
 shutdown() {
   if [[ "${stopping}" == "true" ]]; then return; fi
   stopping="true"
+  echo "Shutdown requested; saving the world before stopping ASA."
   notify "ASA server is stopping. Saving world and uploading final backup..."
   stop_background_loops
   if [[ -n "${asa_pid}" ]]; then
     /asa/scripts/rcon.py SaveWorld || true
     sleep "${BACKUP_SAVE_DELAY_SECONDS:-8}"
+    echo "Requesting graceful ASA process exit."
     /asa/scripts/rcon.py DoExit || kill -TERM "${asa_pid}" 2>/dev/null || true
     for _ in $(seq 1 30); do
       if ! kill -0 "${asa_pid}" 2>/dev/null; then break; fi
@@ -106,8 +108,16 @@ shutdown() {
       sleep 5
     fi
     kill -KILL "${asa_pid}" 2>/dev/null || true
+    wait "${asa_pid}" 2>/dev/null || true
   fi
-  run_backup true || true
+  echo "ASA process stopped; creating the final backup."
+  # The game process can no longer write save files, so reserve the shutdown
+  # time budget for snapshotting, compression, upload, and current promotion.
+  if BACKUP_QUIESCE_TIMEOUT_SECONDS=0 run_backup true; then
+    echo "Final backup and current promotion completed."
+  else
+    echo "Final backup failed before shutdown completed." >&2
+  fi
 }
 
 trap shutdown SIGTERM SIGINT
@@ -289,5 +299,11 @@ cluster_watchdog_pid="$!"
 exit_code=0
 wait "${asa_pid}" || exit_code="$?"
 stop_background_loops
-if [[ "${stopping}" != "true" ]]; then run_backup true || true; fi
+if [[ "${stopping}" != "true" ]]; then
+  run_backup true || true
+else
+  # A user-requested stop is successful when the shutdown handler completed,
+  # regardless of the game process exit status used to finish it.
+  exit_code=0
+fi
 exit "${exit_code}"

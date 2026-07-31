@@ -257,6 +257,7 @@ aws s3 cp local/the-island/Game.ini "s3://<AsaStateBucketName>/main/config/maps/
 - Full Map backupは、前回から30分以上経過してserverが無人なら実行する。Playerが残り続ける場合も60分で実行する。
 - 手動の`/asa backup`は直前に`SaveWorld`を実行する。停止時はserver processの終了後にfinal backupを作成する。
 - `Saved/Logs`、`Saved/Crashes`、`Saved/Profiling`、`Saved/Screenshots`、Cross-ARK用`Saved/clusters`、runtime注入済みconfigはMap archiveへ含めない。
+- 日時付きworld copy、`*.arkrbf`、`*_AntiCorruptionBackup.bak`、`*_NewLaunchBackup.bak`、`*.profilebak`、`*.tribebak`などASA自身のrollback dataはMap archiveへ含めない。現行のworld、player、tribe dataは保持する。
 - 圧縮はCPU・I/Oとも低優先度で実行する。Archiveはdated keyへ1回だけuploadし、`saves/current.tar.zst`はS3内copyで更新する。
 
 ### コストと自動停止

@@ -128,6 +128,10 @@ export async function handler(event: EventBridgeEvent<"ECS Task State Change", E
   const eventVersion = Number.isInteger(detail.version) ? (detail.version as number) : 0;
 
   if (detail.lastStatus === "RUNNING") {
+    if (detail.desiredStatus === "STOPPED") {
+      console.log(`Ignoring stopping RUNNING event for ${identity.mapId}/${identity.runId}/${detail.taskArn}`);
+      return;
+    }
     const publicIp = await resolvePublicIp(detail.taskArn);
     const dnsName = publicIp && hostedZoneId && domainName ? mapDnsName(definition, domainName) : undefined;
     let connectCommand = connectCommandForIp(publicIp);
@@ -172,7 +176,6 @@ export async function handler(event: EventBridgeEvent<"ECS Task State Change", E
         `Map: ${definition.name}`,
         `Session: ${updatedState.sessionName}`,
         publicIp ? `Public IP: ${publicIp}` : "Public IP: not available yet",
-        `Connect: ${connectCommand ?? "not available yet"}`,
         "Game server may still be loading. Wait for READY notification.",
       ].join("\n"),
     );

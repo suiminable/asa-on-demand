@@ -67,7 +67,14 @@ latest_mtime() {
       -path "${saved_dir}/Profiling" -o \
       -path "${saved_dir}/Screenshots" \
     \) -prune -o \
-    -type f -printf '%T@\n' 2>/dev/null \
+    -type f \
+    ! -name '*_AntiCorruptionBackup.bak' \
+    ! -name '*_NewLaunchBackup.bak' \
+    ! -name '*.arkrbf' \
+    ! -name '*.profilebak' \
+    ! -name '*.tribebak' \
+    ! -name '*_[0-9][0-9].[0-9][0-9].[0-9][0-9][0-9][0-9]_[0-9][0-9].[0-9][0-9].[0-9][0-9].ark' \
+    -printf '%T@\n' 2>/dev/null \
     | sort -n \
     | tail -1
 }
@@ -90,21 +97,28 @@ if [[ "$(latest_mtime)" != "${previous_mtime}" ]]; then
 fi
 
 mkdir -p "${snapshot_dir}/Saved"
-# Logs, crash dumps, profiles, and screenshots are diagnostic/transient data.
-# Cross-ARK data lives only on EFS. Exclude all of these before the snapshot
-# copy to reduce local I/O as well as compression and S3 transfer work.
-find "${saved_dir}" -mindepth 1 -maxdepth 1 \
-  ! -name clusters \
-  ! -name Logs \
-  ! -name Crashes \
-  ! -name Profiling \
-  ! -name Screenshots \
-  -exec cp -a -- {} "${snapshot_dir}/Saved/" \;
-# Runtime config contains injected passwords and is rebuilt from common/Map
-# config plus Secrets Manager on every start.
-rm -f \
-  "${snapshot_dir}/Saved/Config/WindowsServer/GameUserSettings.ini" \
-  "${snapshot_dir}/Saved/Config/WindowsServer/Game.ini"
+# Copy only restore-required data into the stable snapshot. Logs, diagnostics,
+# and Cross-ARK data are stored elsewhere. ASA also keeps its own rollback
+# copies beside the live world/player/tribe files; our dated S3 archives replace
+# that rollback mechanism, so omit those copies before local I/O and compression.
+snapshot_excludes=(
+  "--exclude=clusters"
+  "--exclude=Logs"
+  "--exclude=Crashes"
+  "--exclude=Profiling"
+  "--exclude=Screenshots"
+  "--exclude=Config/WindowsServer/GameUserSettings.ini"
+  "--exclude=Config/WindowsServer/Game.ini"
+  "--exclude=*_AntiCorruptionBackup.bak"
+  "--exclude=*_NewLaunchBackup.bak"
+  "--exclude=*.arkrbf"
+  "--exclude=*.profilebak"
+  "--exclude=*.tribebak"
+  "--exclude=*_[0-9][0-9].[0-9][0-9].[0-9][0-9][0-9][0-9]_[0-9][0-9].[0-9][0-9].[0-9][0-9].ark"
+)
+nice -n "${BACKUP_NICE_LEVEL:-15}" ionice -c 3 \
+  tar -cf - "${snapshot_excludes[@]}" -C "${saved_dir}" . \
+  | nice -n "${BACKUP_NICE_LEVEL:-15}" ionice -c 3 tar -xf - -C "${snapshot_dir}/Saved"
 
 nice -n "${BACKUP_NICE_LEVEL:-15}" ionice -c 3 tar --zstd -cf "${archive}" -C "${snapshot_dir}" Saved
 

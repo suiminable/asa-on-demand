@@ -426,7 +426,7 @@ async function readReadyAt(state: MapServerState): Promise<string | undefined> {
 }
 
 function stateLine(state: MapServerState, playerCount?: number, readyAt?: string): string {
-  return `${state.mapId}: ${state.status} | ready ${readyAt ? "yes" : "no"} | players ${playerCount ?? "?"}/${state.maxPlayers} | idle ${state.idleTimeoutMinutes}m | ${state.connectCommand ?? "no address"}`;
+  return `${state.mapId}: ${state.status} | ready ${readyAt ? "yes" : "no"} | players ${playerCount ?? "?"}/${state.maxPlayers} | idle ${state.idleTimeoutMinutes}m`;
 }
 
 async function handleStatus(interaction: DiscordInteraction) {
@@ -444,7 +444,6 @@ async function handleStatus(interaction: DiscordInteraction) {
         `Players: ${playerCount ?? "unknown"} / ${state.maxPlayers}`,
         `Started: ${state.startedAt ?? "N/A"}`,
         `Idle auto-stop: ${state.idleTimeoutMinutes} minutes`,
-        `Connect: ${state.connectCommand ?? "not available"}`,
       ].join("\n"),
       true,
     );
@@ -474,7 +473,6 @@ async function handleInfo(interaction: DiscordInteraction) {
       `Map: ${target.definition.name}`,
       `Event: ${eventModLabel(target.state.eventModId)}`,
       `Ready: ${readyAt ?? "not ready"}`,
-      `Connect: ${target.state.connectCommand ?? "not available"}`,
       passwordLine,
     ].join("\n"),
     true,

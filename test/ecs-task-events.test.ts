@@ -205,6 +205,25 @@ describe("generation-aware ECS task settlement", () => {
     expect(mocks.postWebhook).not.toHaveBeenCalled();
   });
 
+  it("ignores a RUNNING event emitted while the task is stopping", async () => {
+    await handler({
+      detail: {
+        clusterArn: "cluster",
+        taskArn: "task-1",
+        group: "asa-map:the-island:run-island-12345678",
+        version: 10,
+        lastStatus: "RUNNING",
+        desiredStatus: "STOPPED",
+      },
+    } as never);
+
+    expect(mocks.ecsSend).not.toHaveBeenCalled();
+    expect(mocks.ec2Send).not.toHaveBeenCalled();
+    expect(mocks.updateMapFromRunningEvent).not.toHaveBeenCalled();
+    expect(mocks.route53Send).not.toHaveBeenCalled();
+    expect(mocks.postWebhook).not.toHaveBeenCalled();
+  });
+
   it("updates DNS only after claiming the current RUNNING event", async () => {
     await handler({
       detail: {
@@ -226,5 +245,6 @@ describe("generation-aware ECS task settlement", () => {
       connectCommand: "open the-island.example.test:7777?Password=YOUR_SERVER_PASSWORD",
     });
     expect(mocks.postWebhook).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("Session: private-asa-island"));
+    expect(mocks.postWebhook).toHaveBeenCalledWith(expect.anything(), expect.not.stringContaining("Connect:"));
   });
 });
