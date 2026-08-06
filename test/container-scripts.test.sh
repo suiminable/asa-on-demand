@@ -174,9 +174,17 @@ backup_map() {
   mkdir -p \
     "${install_root}/ShooterGame/Saved/SavedArks" \
     "${install_root}/ShooterGame/Saved/clusters/clusters/${cluster_id}" \
-    "${install_root}/ShooterGame/Saved/Config/WindowsServer"
+    "${install_root}/ShooterGame/Saved/Config/WindowsServer" \
+    "${install_root}/ShooterGame/Saved/Logs" \
+    "${install_root}/ShooterGame/Saved/Crashes" \
+    "${install_root}/ShooterGame/Saved/Profiling" \
+    "${install_root}/ShooterGame/Saved/Screenshots"
   printf '%s\n' "${world_value}" >"${install_root}/ShooterGame/Saved/SavedArks/world.ark"
   printf 'must-not-be-archived\n' >"${install_root}/ShooterGame/Saved/clusters/clusters/${cluster_id}/transfer.dat"
+  printf 'transient-log\n' >"${install_root}/ShooterGame/Saved/Logs/server.log"
+  printf 'transient-crash\n' >"${install_root}/ShooterGame/Saved/Crashes/server.dmp"
+  printf 'transient-profile\n' >"${install_root}/ShooterGame/Saved/Profiling/server.profile"
+  printf 'transient-screenshot\n' >"${install_root}/ShooterGame/Saved/Screenshots/server.png"
   printf '[ServerSettings]\nServerAdminPassword=must-not-be-archived\n' \
     >"${install_root}/ShooterGame/Saved/Config/WindowsServer/GameUserSettings.ini"
   printf '[/Script/ShooterGame.ShooterGameMode]\n' >"${install_root}/ShooterGame/Saved/Config/WindowsServer/Game.ini"
@@ -188,6 +196,7 @@ backup_map() {
     ASA_INSTALL_DIR="${install_root}" \
     ASA_RUN_ID="${run_id}" \
     ASA_TMP_ROOT="${work_root}/backup-tmp-${map_id}" \
+    FAKE_AWS_LOG="${work_root}/backup-aws-${map_id}.log" \
     SKIP_RCON_SAVE=true \
     BACKUP_QUIESCE_INTERVAL_SECONDS=0 \
     BACKUP_QUIESCE_TIMEOUT_SECONDS=1 \
@@ -204,6 +213,17 @@ for map_id in the-island scorched-earth; do
   if tar --zstd -tf "${archive}" | grep -Eq '^Saved/Config/WindowsServer/(GameUserSettings.ini|Game.ini)$'; then
     fail "backup for ${map_id} contains runtime config or injected passwords"
   fi
+  if tar --zstd -tf "${archive}" | grep -Eq '^Saved/(Logs|Crashes|Profiling|Screenshots)(/|$)'; then
+    fail "backup for ${map_id} contains transient diagnostics"
+  fi
+  dated_archive="$(find "${fake_s3}/${bucket}/${prefix}maps/${map_id}/backups" -type f -name '*.tar.zst' -print -quit)"
+  [[ -n "${dated_archive}" ]] || fail "backup for ${map_id} has no dated archive"
+  cmp "${dated_archive}" "${archive}" || fail "S3-side current copy differs from the dated archive for ${map_id}"
+  aws_log="${work_root}/backup-aws-${map_id}.log"
+  [[ "$(grep -Ec '^s3 cp .*/current-[0-9TZ]+\.tar\.zst s3://' "${aws_log}")" == "1" ]] \
+    || fail "backup for ${map_id} uploaded its local archive more than once"
+  grep -Eq '^s3 cp s3://.*/backups/.+\.tar\.zst s3://.*/saves/current\.tar\.zst --copy-props none --no-progress[[:space:]]*$' "${aws_log}" \
+    || fail "backup for ${map_id} did not create current.tar.zst with an S3-side copy"
   extracted="${work_root}/backup-extract-${map_id}"
   mkdir -p "${extracted}"
   tar --zstd -xf "${archive}" -C "${extracted}"
@@ -252,6 +272,16 @@ normal_directory="${work_root}/not-a-mount"
 mkdir -p "${normal_directory}"
 if ASA_CLUSTER_DIR="${normal_directory}" bash "${repo_root}/container/cluster-probe.sh" >/dev/null 2>&1; then
   fail "cluster probe accepted an ordinary directory"
+fi
+if ! (
+  mountpoint() {
+    return 0
+  }
+  export -f mountpoint
+  ASA_CLUSTER_DIR="${normal_directory}" ASA_RUN_ID="-leading-hyphen-run-id" \
+    bash "${repo_root}/container/cluster-probe.sh"
+); then
+  fail "cluster probe rejected a run ID starting with a hyphen"
 fi
 if env "${migration_env[@]}" ASA_CLUSTER_ID='../escape' bash "${repo_root}/container/migrate-storage.sh" migrate-parallel >/dev/null 2>&1; then
   fail "migration accepted a path-traversing cluster ID"

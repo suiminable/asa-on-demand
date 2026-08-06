@@ -251,6 +251,17 @@ Build and push a new immutable tag:
 
 Then repeat the full deploy command from [First Deployment](#first-deployment) with the new `asaBuildId`. Keep every other environment-specific context value unchanged. `asaUpdateOnStart=true` exists for emergency SteamCMD updates, but the normal path is a baked and tested image.
 
+### Saves and Map Backups
+
+- `SaveWorld` runs every 10 minutes independently of the heavier archive path.
+- RCON commands are serialized, and `SaveWorld` may wait up to 30 seconds for its response. Discord is notified once after three consecutive failures and again when saves recover.
+- A full Map backup runs after 30 minutes when the server is empty, or at 60 minutes even if players remain. It waits for a recent scheduled `SaveWorld`, but after at most 15 minutes of failed saves it preserves the latest save already on disk.
+- A manual `/asa backup` performs `SaveWorld` first. Shutdown creates its final backup after the server process exits.
+- If a live save changes during snapshotting, only the local pre-upload copy is retried, up to three attempts. If an automatic backup still fails, Discord reports only the first failure and the eventual recovery.
+- Map archives exclude `Saved/Logs`, `Saved/Crashes`, `Saved/Profiling`, `Saved/Screenshots`, Cross-ARK `Saved/clusters`, and runtime-injected configuration.
+- ASA rollback data such as timestamped world copies, `*.arkrbf`, `*_AntiCorruptionBackup.bak`, `*_NewLaunchBackup.bak`, `*.profilebak`, and `*.tribebak` is excluded from Map archives. The live world, player, and tribe data remains included.
+- Compression runs at low CPU and I/O priority. The archive is uploaded once to its dated key, then `saves/current.tar.zst` is updated with an S3-side copy.
+
 ### Cost and Automatic Stop
 
 - Every Map has its own idle timeout and heartbeat. Missing or stale heartbeats do not trigger a stop.

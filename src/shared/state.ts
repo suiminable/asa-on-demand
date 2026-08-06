@@ -298,9 +298,10 @@ export class StateStore {
           UpdateExpression:
             "SET #status = :running, taskArn = :taskArn, clusterArn = :clusterArn, taskStartedAt = :startedAt, publicIp = :publicIp, connectCommand = :connect, lastEcsEventVersion = :version, #updatedAt = :now",
           ConditionExpression:
-            "runId = :runId AND (attribute_not_exists(taskArn) OR taskArn = :null OR taskArn = :taskArn) AND (attribute_not_exists(lastEcsEventVersion) OR lastEcsEventVersion = :null OR lastEcsEventVersion < :version)",
+            "#status = :starting AND runId = :runId AND (attribute_not_exists(taskArn) OR taskArn = :null OR taskArn = :taskArn) AND (attribute_not_exists(lastEcsEventVersion) OR lastEcsEventVersion = :null OR lastEcsEventVersion < :version)",
           ExpressionAttributeNames: { "#status": "status", "#updatedAt": "updatedAt" },
           ExpressionAttributeValues: {
+            ":starting": "STARTING",
             ":running": "RUNNING",
             ":runId": params.runId,
             ":taskArn": params.taskArn,

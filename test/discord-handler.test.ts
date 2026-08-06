@@ -353,6 +353,7 @@ describe("Discord map control", () => {
     const status = await runAsync("status");
     expect(status).toContain("the-island: RUNNING");
     expect(status).toContain("scorched-earth: RUNNING");
+    expect(status).not.toContain("open 192.0.2.1:7777");
     const stop = await runAsync("stop");
     expect(stop).toContain("Multiple maps are active");
   });
@@ -378,7 +379,9 @@ describe("Discord map control", () => {
         },
       });
     });
-    expect(await runAsync("status", [{ name: "map", value: "TheIsland_WP" }])).toContain("Ready: not ready");
+    const staleStatus = await runAsync("status", [{ name: "map", value: "TheIsland_WP" }]);
+    expect(staleStatus).toContain("Ready: not ready");
+    expect(staleStatus).not.toContain("Connect:");
 
     mocks.s3Send.mockImplementation((command) => {
       if (command.input.Key.endsWith("heartbeat.json")) throw new Error("no heartbeat");
@@ -389,5 +392,6 @@ describe("Discord map control", () => {
       });
     });
     expect(await runAsync("status", [{ name: "map", value: "TheIsland_WP" }])).toContain("Ready: 20");
+    expect(await runAsync("info", [{ name: "map", value: "TheIsland_WP" }])).not.toContain("Connect:");
   });
 });

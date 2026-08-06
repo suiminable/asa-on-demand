@@ -251,6 +251,17 @@ aws s3 cp local/the-island/Game.ini "s3://<AsaStateBucketName>/main/config/maps/
 
 その後、[初回デプロイ](#初回デプロイ)のfull deploy commandを、新しい`asaBuildId`で再実行する。その環境固有のほかのcontext値はすべて維持する。`asaUpdateOnStart=true`は緊急時のSteamCMD update用。通常はbuild・test済みimageを使う。
 
+### SaveとMap backup
+
+- `SaveWorld`は10分ごとに実行し、重いarchive処理から分離する。
+- RCON commandは直列化し、`SaveWorld`の応答は最大30秒待つ。Discord通知は3回連続で失敗した場合に1回送り、復旧時にも通知する。
+- Full Map backupは、前回から30分以上経過してserverが無人なら実行する。Playerが残り続ける場合も60分で実行する。直近の定期`SaveWorld`成功を待って開始するが、失敗が続く場合は最大15分で待ちを打ち切り、disk上の最新saveを保全する。
+- 手動の`/asa backup`は直前に`SaveWorld`を実行する。停止時はserver processの終了後にfinal backupを作成する。
+- 稼働中のsave fileがsnapshot中に変化した場合は、S3 upload前のlocal copyだけを最大3回再試行する。自動backupがそれでも失敗した場合、Discordには最初の失敗と復旧だけを通知する。
+- `Saved/Logs`、`Saved/Crashes`、`Saved/Profiling`、`Saved/Screenshots`、Cross-ARK用`Saved/clusters`、runtime注入済みconfigはMap archiveへ含めない。
+- 日時付きworld copy、`*.arkrbf`、`*_AntiCorruptionBackup.bak`、`*_NewLaunchBackup.bak`、`*.profilebak`、`*.tribebak`などASA自身のrollback dataはMap archiveへ含めない。現行のworld、player、tribe dataは保持する。
+- 圧縮はCPU・I/Oとも低優先度で実行する。Archiveはdated keyへ1回だけuploadし、`saves/current.tar.zst`はS3内copyで更新する。
+
 ### コストと自動停止
 
 - Mapごとにidle timeoutとheartbeatを持つ。Heartbeatの欠落やstaleだけでは停止しない。

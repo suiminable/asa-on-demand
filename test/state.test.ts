@@ -212,6 +212,36 @@ describe("StateStore", () => {
     ).resolves.toBe(false);
   });
 
+  it("transitions a task to RUNNING only while the map is STARTING", async () => {
+    mocks.send.mockResolvedValueOnce({ Attributes: { status: "RUNNING" } });
+    const store = new StateStore("table");
+
+    await expect(
+      store.updateMapFromRunningEvent({
+        mapId: "the-island",
+        runId: "run-island-12345678",
+        taskArn: "task-1",
+        eventVersion: 9,
+        clusterArn: "cluster",
+        taskStartedAt: "2026-07-19T00:00:00.000Z",
+        publicIp: "203.0.113.10",
+        connectCommand: "open 203.0.113.10:7777",
+      }),
+    ).resolves.toMatchObject({ status: "RUNNING" });
+
+    const command = mocks.send.mock.calls[0][0] as { input: Record<string, unknown> };
+    expect(command.input).toMatchObject({
+      Key: { pk: "MAP#the-island" },
+      ConditionExpression: expect.stringContaining("#status = :starting"),
+      ExpressionAttributeValues: expect.objectContaining({
+        ":starting": "STARTING",
+        ":running": "RUNNING",
+        ":runId": "run-island-12345678",
+        ":taskArn": "task-1",
+      }),
+    });
+  });
+
   it("updates idle state only while the same task is running", async () => {
     const store = new StateStore("table");
     await expect(
