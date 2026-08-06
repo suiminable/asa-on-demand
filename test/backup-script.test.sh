@@ -26,6 +26,7 @@ install_root="${work_root}/install"
 saved_root="${install_root}/ShooterGame/Saved"
 tmp_root="${work_root}/tmp"
 aws_log="${work_root}/aws.log"
+real_tar="$(command -v tar)"
 mkdir -p \
   "${fake_bin}" \
   "${fake_s3}/${bucket}" \
@@ -37,6 +38,7 @@ mkdir -p \
   "${saved_root}/Profiling" \
   "${saved_root}/Screenshots"
 ln -s "${repo_root}/test/fixtures/fake-aws.sh" "${fake_bin}/aws"
+ln -s "${repo_root}/test/fixtures/fake-flaky-tar.sh" "${fake_bin}/tar"
 if ! command -v zstd >/dev/null 2>&1; then
   ln -s "${repo_root}/test/fixtures/fake-zstd.sh" "${fake_bin}/zstd"
 fi
@@ -64,6 +66,7 @@ printf 'screenshot\n' >"${saved_root}/Screenshots/server.png"
 export PATH="${fake_bin}:${PATH}"
 export FAKE_S3_ROOT="${fake_s3}"
 export FAKE_AWS_LOG="${aws_log}"
+export REAL_TAR_BIN="${real_tar}"
 (
   while true; do
     touch "${saved_root}/Logs/server.log"
@@ -119,6 +122,33 @@ jq -e \
     and (.backupAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
     and .promotedAt == .lastBackupAt' \
   "${fake_s3}/${bucket}/${prefix}runtime/last-backup.json" >/dev/null
+
+snapshot_retry_prefix="fixture/maps/snapshot-retry/"
+snapshot_retry_tmp_root="${work_root}/snapshot-retry-tmp"
+snapshot_retry_aws_log="${work_root}/snapshot-retry-aws.log"
+snapshot_retry_state="${work_root}/snapshot-retry-count"
+env \
+  S3_BUCKET="${bucket}" \
+  S3_SAVE_KEY="${snapshot_retry_prefix}saves/current.tar.zst" \
+  S3_BACKUP_PREFIX="${snapshot_retry_prefix}backups/" \
+  S3_RUNTIME_PREFIX="${snapshot_retry_prefix}runtime/" \
+  ASA_INSTALL_DIR="${install_root}" \
+  ASA_RUN_ID=run-snapshot-retry-12345678 \
+  ASA_TMP_ROOT="${snapshot_retry_tmp_root}" \
+  SKIP_RCON_SAVE=true \
+  BACKUP_QUIESCE_INTERVAL_SECONDS=0 \
+  BACKUP_QUIESCE_TIMEOUT_SECONDS=1 \
+  BACKUP_SNAPSHOT_MAX_ATTEMPTS=3 \
+  BACKUP_SNAPSHOT_RETRY_SECONDS=0 \
+  FAKE_AWS_LOG="${snapshot_retry_aws_log}" \
+  FAKE_TAR_SNAPSHOT_FAILURES=1 \
+  FAKE_TAR_FAILURE_STATE="${snapshot_retry_state}" \
+  bash "${repo_root}/container/backup.sh"
+[[ "$(<"${snapshot_retry_state}")" == "1" ]] || fail "snapshot race was not simulated exactly once"
+[[ -f "${fake_s3}/${bucket}/${snapshot_retry_prefix}saves/current.tar.zst" ]] \
+  || fail "backup did not recover from a transient snapshot race"
+[[ "$(grep -Ec '^s3 cp .*/current-[0-9TZ]+\.tar\.zst s3://' "${snapshot_retry_aws_log}")" == "1" ]] \
+  || fail "snapshot retry uploaded the local archive more than once"
 
 failure_prefix="fixture/maps/promotion-failure/"
 failure_tmp_root="${work_root}/failure-tmp"

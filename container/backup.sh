@@ -13,8 +13,19 @@ scripts_root="${ASA_SCRIPTS_DIR:-/asa/scripts}"
 mkdir -p "${tmp_root}"
 lock_file="${BACKUP_LOCK_FILE:-${tmp_root%/}/backup.lock}"
 archive_completion_marker="${BACKUP_ARCHIVE_COMPLETION_MARKER:-${BACKUP_COMPLETION_MARKER:-${tmp_root%/}/last-archive.completed}}"
+save_completion_marker="${SAVEWORLD_COMPLETION_MARKER:-${tmp_root%/}/last-saveworld.completed}"
+snapshot_max_attempts="${BACKUP_SNAPSHOT_MAX_ATTEMPTS:-3}"
+snapshot_retry_seconds="${BACKUP_SNAPSHOT_RETRY_SECONDS:-2}"
 promotion_max_attempts="${BACKUP_PROMOTION_MAX_ATTEMPTS:-3}"
 promotion_retry_seconds="${BACKUP_PROMOTION_RETRY_INITIAL_SECONDS:-2}"
+if [[ ! "${snapshot_max_attempts}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "BACKUP_SNAPSHOT_MAX_ATTEMPTS must be a positive integer." >&2
+  exit 2
+fi
+if [[ ! "${snapshot_retry_seconds}" =~ ^[0-9]+$ ]]; then
+  echo "BACKUP_SNAPSHOT_RETRY_SECONDS must be a non-negative integer." >&2
+  exit 2
+fi
 if [[ ! "${promotion_max_attempts}" =~ ^[1-9][0-9]*$ ]]; then
   echo "BACKUP_PROMOTION_MAX_ATTEMPTS must be a positive integer." >&2
   exit 2
@@ -52,7 +63,9 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ "${SKIP_RCON_SAVE:-false}" != "true" ]]; then
-  if ! "${scripts_root}/rcon.py" SaveWorld; then
+  if "${scripts_root}/rcon.py" SaveWorld; then
+    touch "${save_completion_marker}"
+  else
     echo "RCON SaveWorld failed; archiving the latest save on disk." >&2
   fi
   sleep "${BACKUP_SAVE_DELAY_SECONDS:-8}"
@@ -79,24 +92,6 @@ latest_mtime() {
     | tail -1
 }
 
-# The server keeps writing save files independently of SaveWorld. Ignore the
-# transient paths that are not archived, wait for relevant writes to settle,
-# then archive a snapshot copy instead of racing the live directory.
-quiesce_deadline=$(( SECONDS + ${BACKUP_QUIESCE_TIMEOUT_SECONDS:-60} ))
-previous_mtime="$(latest_mtime)"
-while (( SECONDS < quiesce_deadline )); do
-  sleep "${BACKUP_QUIESCE_INTERVAL_SECONDS:-5}"
-  current_mtime="$(latest_mtime)"
-  if [[ "${current_mtime}" == "${previous_mtime}" ]]; then
-    break
-  fi
-  previous_mtime="${current_mtime}"
-done
-if [[ "$(latest_mtime)" != "${previous_mtime}" ]]; then
-  echo "Save writes did not settle within timeout; snapshotting anyway." >&2
-fi
-
-mkdir -p "${snapshot_dir}/Saved"
 # Copy only restore-required data into the stable snapshot. Logs, diagnostics,
 # and Cross-ARK data are stored elsewhere. ASA also keeps its own rollback
 # copies beside the live world/player/tribe files; our dated S3 archives replace
@@ -116,9 +111,44 @@ snapshot_excludes=(
   "--exclude=*.tribebak"
   "--exclude=*_[0-9][0-9].[0-9][0-9].[0-9][0-9][0-9][0-9]_[0-9][0-9].[0-9][0-9].[0-9][0-9].ark"
 )
-nice -n "${BACKUP_NICE_LEVEL:-15}" ionice -c 3 \
-  tar -cf - "${snapshot_excludes[@]}" -C "${saved_dir}" . \
-  | nice -n "${BACKUP_NICE_LEVEL:-15}" ionice -c 3 tar -xf - -C "${snapshot_dir}/Saved"
+
+wait_for_quiescence() {
+  local quiesce_deadline previous_mtime current_mtime
+  quiesce_deadline=$(( SECONDS + ${BACKUP_QUIESCE_TIMEOUT_SECONDS:-60} ))
+  previous_mtime="$(latest_mtime)"
+  while (( SECONDS < quiesce_deadline )); do
+    sleep "${BACKUP_QUIESCE_INTERVAL_SECONDS:-5}"
+    current_mtime="$(latest_mtime)"
+    if [[ "${current_mtime}" == "${previous_mtime}" ]]; then
+      break
+    fi
+    previous_mtime="${current_mtime}"
+  done
+  if [[ "$(latest_mtime)" != "${previous_mtime}" ]]; then
+    echo "Save writes did not settle within timeout; snapshotting anyway." >&2
+  fi
+}
+
+# The server can update a save file after the quiescence check. Retry only the
+# cheap local snapshot stage when tar detects that race; upload is still once.
+snapshot_attempt=1
+while true; do
+  wait_for_quiescence
+  rm -rf "${snapshot_dir}"
+  mkdir -p "${snapshot_dir}/Saved"
+  if nice -n "${BACKUP_NICE_LEVEL:-15}" ionice -c 3 \
+    tar -cf - "${snapshot_excludes[@]}" -C "${saved_dir}" . \
+    | nice -n "${BACKUP_NICE_LEVEL:-15}" ionice -c 3 tar -xf - -C "${snapshot_dir}/Saved"; then
+    break
+  fi
+  if (( snapshot_attempt >= snapshot_max_attempts )); then
+    echo "Failed to create a stable save snapshot after ${snapshot_attempt} attempts." >&2
+    exit 1
+  fi
+  echo "Save snapshot copy failed; retrying in ${snapshot_retry_seconds}s (${snapshot_attempt}/${snapshot_max_attempts})." >&2
+  sleep "${snapshot_retry_seconds}"
+  snapshot_attempt=$(( snapshot_attempt + 1 ))
+done
 
 nice -n "${BACKUP_NICE_LEVEL:-15}" ionice -c 3 tar --zstd -cf "${archive}" -C "${snapshot_dir}" Saved
 

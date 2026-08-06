@@ -59,6 +59,8 @@ request_loop_pid=""
 heartbeat_loop_pid=""
 cluster_watchdog_pid=""
 stopping="false"
+save_completion_marker="${SAVEWORLD_COMPLETION_MARKER:-${ASA_TMP_ROOT:-/asa/tmp}/last-saveworld.completed}"
+mkdir -p "$(dirname "${save_completion_marker}")"
 
 notify() {
   local content
@@ -66,11 +68,22 @@ notify() {
   /asa/scripts/notify-discord.sh "${content}" || true
 }
 
+save_world() {
+  if /asa/scripts/rcon.py SaveWorld; then
+    touch "${save_completion_marker}"
+    return 0
+  fi
+  return 1
+}
+
 run_backup() {
+  local notify_failure="${2:-true}"
   if SKIP_RCON_SAVE="${1:-false}" /asa/scripts/backup.sh; then
     return 0
   fi
-  notify "ASA backup failed at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+  if [[ "${notify_failure}" == "true" ]]; then
+    notify "ASA backup failed at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+  fi
   return 1
 }
 
@@ -95,7 +108,7 @@ shutdown() {
   notify "ASA server is stopping. Saving world and uploading final backup..."
   stop_background_loops
   if [[ -n "${asa_pid}" ]]; then
-    /asa/scripts/rcon.py SaveWorld || true
+    save_world || true
     sleep "${BACKUP_SAVE_DELAY_SECONDS:-8}"
     echo "Requesting graceful ASA process exit."
     /asa/scripts/rcon.py DoExit || kill -TERM "${asa_pid}" 2>/dev/null || true
@@ -189,9 +202,26 @@ asa_pid="$!"
 
 (
   interval="${AUTO_SAVE_INTERVAL_SECONDS:-600}"
+  notify_threshold="${AUTO_SAVE_FAILURE_NOTIFY_THRESHOLD:-3}"
+  consecutive_failures=0
+  failure_notified="false"
   while true; do
     sleep "${interval}"
-    /asa/scripts/rcon.py SaveWorld || notify "ASA automatic SaveWorld failed at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+    if save_world; then
+      if [[ "${failure_notified}" == "true" ]]; then
+        notify "ASA automatic SaveWorld recovered at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+      fi
+      consecutive_failures=0
+      failure_notified="false"
+      continue
+    fi
+
+    consecutive_failures=$(( consecutive_failures + 1 ))
+    echo "Automatic SaveWorld failed (${consecutive_failures} consecutive attempts)." >&2
+    if (( consecutive_failures >= notify_threshold )) && [[ "${failure_notified}" != "true" ]]; then
+      notify "ASA automatic SaveWorld failed ${consecutive_failures} consecutive times as of $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+      failure_notified="true"
+    fi
   done
 ) &
 save_loop_pid="$!"
@@ -200,7 +230,12 @@ save_loop_pid="$!"
   min_interval="${AUTO_BACKUP_MIN_INTERVAL_SECONDS:-1800}"
   max_interval="${AUTO_BACKUP_MAX_INTERVAL_SECONDS:-3600}"
   check_interval="${AUTO_BACKUP_CHECK_INTERVAL_SECONDS:-60}"
+  recent_save_seconds="${AUTO_BACKUP_RECENT_SAVE_SECONDS:-120}"
+  max_save_deferral="${AUTO_BACKUP_MAX_SAVE_DEFERRAL_SECONDS:-900}"
   backup_marker="${BACKUP_ARCHIVE_COMPLETION_MARKER:-${BACKUP_COMPLETION_MARKER:-${ASA_TMP_ROOT:-/asa/tmp}/last-archive.completed}}"
+  save_marker="${save_completion_marker}"
+  save_deferred="false"
+  backup_failure_notified="false"
   mkdir -p "$(dirname "${backup_marker}")"
   if [[ ! -e "${backup_marker}" ]]; then
     touch "${backup_marker}"
@@ -224,13 +259,36 @@ save_loop_pid="$!"
       fi
     fi
     if [[ -z "${reason}" ]]; then
+      save_deferred="false"
       continue
     fi
 
+    last_save_at="$(stat -c %Y "${save_marker}" 2>/dev/null || printf '0')"
+    save_age=$(( now - last_save_at ))
+    if (( save_age > recent_save_seconds && elapsed < max_interval + max_save_deferral )); then
+      if [[ "${save_deferred}" != "true" ]]; then
+        echo "Deferring automatic full backup until a recent SaveWorld succeeds."
+        save_deferred="true"
+      fi
+      continue
+    fi
+    if (( save_age > recent_save_seconds )); then
+      echo "No recent SaveWorld after ${max_save_deferral}s of maximum-interval deferral; backing up the latest save on disk." >&2
+    fi
+    save_deferred="false"
+
     echo "Starting automatic full backup: ${reason}."
-    # SaveWorld has its own 10-minute cadence. Avoid coupling another save
-    # pause to the heavier snapshot/compression/upload path.
-    run_backup true || true
+    # SaveWorld keeps its own cadence. Waiting for its completion marker avoids
+    # starting the heavier snapshot while a scheduled save is in progress.
+    if run_backup true false; then
+      if [[ "${backup_failure_notified}" == "true" ]]; then
+        notify "ASA automatic backup recovered at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+      fi
+      backup_failure_notified="false"
+    elif [[ "${backup_failure_notified}" != "true" ]]; then
+      notify "ASA automatic backup failed at $(date -u +%Y-%m-%dT%H:%M:%SZ); retries will continue without repeated notifications."
+      backup_failure_notified="true"
+    fi
   done
 ) &
 backup_loop_pid="$!"
