@@ -69,7 +69,7 @@ flowchart TB
 | Area | Resources | Responsibility |
 | --- | --- | --- |
 | Entry point | API Gateway, Discord Lambda | Verify Discord signatures and authorization, defer commands, and coordinate start/stop/status operations. |
-| Compute | ECS cluster, game task definition | Start one public-IP Fargate task for each active Map. Fargate Spot is preferred; on-demand fallback is opt-in. |
+| Compute | ECS cluster, game task definition | Start one public-IP Fargate task for each active Map. Fargate Spot is the default, with regular Fargate selectable at start time. |
 | Lifecycle | ECS events Lambda, stop Lambda, reconciler, Scheduler | Settle task state, publish connection details, perform idle stops, and recover stale start operations. |
 | Persistent state | S3, DynamoDB, EFS | Store Map archives/runtime objects, control-plane state, and shared Cross-ARK data respectively. |
 | Images | Dedicated ECR repository | Store the server image selected by `asaBuildId`; retain the two newest images. |
@@ -209,6 +209,8 @@ The example below creates an environment named `main`. Use the same profile, reg
 
 6. Run `/asa start` in the guild.
 
+   To avoid Spot interruption for a run, select `Fargate On-Demand (no Spot interruption)` for `capacity`. Omitting it uses Fargate Spot.
+
 The image must exist before step 6. Discord credentials must exist before endpoint verification and command registration. A destroy/redeploy changes the API Gateway URL, so update the Developer Portal afterward.
 
 ## Configuration
@@ -267,7 +269,8 @@ Then repeat the full deploy command from [First Deployment](#first-deployment) w
 - Every Map has its own idle timeout and heartbeat. Missing or stale heartbeats do not trigger a stop.
 - The Lambda control plane enforces a monthly runtime-hours limit and reports conservative and Spot cost estimates.
 - AWS Budgets email notifications are optional through `enableAwsBudget=true` and `budgetEmail`.
-- Fargate on-demand fallback is disabled unless `enableOnDemandFallback=true` is set.
+- `/asa start capacity:on-demand` uses only regular Fargate, while `capacity:spot` uses only Fargate Spot. Select these from the registered Discord choices.
+- When `capacity` is omitted, the task uses only Fargate Spot.
 
 ## Commands
 

@@ -114,6 +114,16 @@ const commands = [
             choices: mapChoices,
           },
           {
+            name: "capacity",
+            description: "Fargate capacity for this start; omit to use Fargate Spot",
+            type: 3,
+            required: false,
+            choices: [
+              { name: "Fargate Spot (lower cost)", value: "spot" },
+              { name: "Fargate On-Demand (no Spot interruption)", value: "on-demand" },
+            ],
+          },
+          {
             name: "max_players",
             description: "Maximum players",
             type: 4,

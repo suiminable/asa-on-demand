@@ -94,7 +94,6 @@ export class AsaFargateStack extends cdk.Stack {
     if (!Number.isInteger(clusterBackupRetentionDays) || clusterBackupRetentionDays < 7) {
       throw new Error("Context clusterBackupRetentionDays must be an integer of at least 7.");
     }
-    const enableOnDemandFallback = booleanContext(this, "enableOnDemandFallback", false);
     const allowDiscordPasswordNotification = booleanContext(this, "allowDiscordPasswordNotification", false);
     const asaBuildId = stringContext(this, "asaBuildId") || "initial";
     if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(asaBuildId)) {
@@ -164,7 +163,6 @@ export class AsaFargateStack extends cdk.Stack {
       hourlyCostJpy,
       spotHourlyCostJpy,
       jpyPerUsd,
-      enableOnDemandFallback,
       allowDiscordPasswordNotification,
       hostedZoneId,
       hostedZoneName,

@@ -73,10 +73,29 @@ const defaultIdleMinutes = intEnv("DEFAULT_IDLE_MINUTES", DEFAULT_IDLE_MINUTES);
 const monthlyRuntimeHoursLimit = intEnv("MONTHLY_RUNTIME_HOURS_LIMIT", 80);
 const maxConcurrentMaps = intEnv("MAX_CONCURRENT_MAPS", 2);
 const spotHourlyCostJpy = Number(process.env.SPOT_HOURLY_COST_JPY ?? "17");
-const enableOnDemandFallback = process.env.ENABLE_ON_DEMAND_FALLBACK === "true";
 const allowDiscordPasswordNotification = process.env.ALLOW_DISCORD_PASSWORD_NOTIFICATION === "true";
 const functionName = requireEnv("AWS_LAMBDA_FUNCTION_NAME");
 const heartbeatFreshnessSeconds = intEnv("HEARTBEAT_FRESHNESS_SECONDS", HEARTBEAT_FRESHNESS_SECONDS);
+
+type CapacityMode = "spot" | "on-demand";
+
+function capacityLabel(mode: CapacityMode): string {
+  switch (mode) {
+    case "spot":
+      return "Fargate Spot";
+    case "on-demand":
+      return "Fargate On-Demand";
+  }
+}
+
+function capacityProviderStrategy(mode: CapacityMode) {
+  switch (mode) {
+    case "spot":
+      return [{ capacityProvider: "FARGATE_SPOT", weight: 1 }];
+    case "on-demand":
+      return [{ capacityProvider: "FARGATE", weight: 1 }];
+  }
+}
 
 interface AsyncCommandEvent {
   source: "asa.discord.command";
@@ -189,6 +208,11 @@ async function handleStart(interaction: DiscordInteraction) {
   const idleTimeoutMinutes = Number(optionValue<number>(interaction, "idle_minutes") ?? defaultIdleMinutes);
   let maxPlayers = Math.min(Math.max(Number(optionValue<number>(interaction, "max_players") ?? DEFAULT_MAX_PLAYERS), 1), MAX_PLAYERS);
   const publicNotify = optionValue<boolean>(interaction, "public_notify") ?? true;
+  const requestedCapacity = optionValue<string>(interaction, "capacity");
+  if (requestedCapacity !== undefined && requestedCapacity !== "spot" && requestedCapacity !== "on-demand") {
+    return message("capacity must be spot or on-demand. Re-register the Discord commands.", true);
+  }
+  const capacityMode: CapacityMode = requestedCapacity ?? "spot";
   if (!Number.isInteger(idleTimeoutMinutes) || idleTimeoutMinutes < MIN_IDLE_MINUTES || idleTimeoutMinutes > MAX_IDLE_MINUTES) {
     return message(`idle_minutes must be an integer from ${MIN_IDLE_MINUTES} to ${MAX_IDLE_MINUTES}.`, true);
   }
@@ -288,13 +312,9 @@ async function handleStart(interaction: DiscordInteraction) {
         tags: [
           { key: "asa:map-id", value: definition.mapId },
           { key: "asa:run-id", value: runId },
+          { key: "asa:capacity-mode", value: capacityMode },
         ],
-        capacityProviderStrategy: enableOnDemandFallback
-          ? [
-              { capacityProvider: "FARGATE_SPOT", weight: 1, base: 0 },
-              { capacityProvider: "FARGATE", weight: 1, base: 0 },
-            ]
-          : [{ capacityProvider: "FARGATE_SPOT", weight: 1, base: 0 }],
+        capacityProviderStrategy: capacityProviderStrategy(capacityMode),
         networkConfiguration: {
           awsvpcConfiguration: { assignPublicIp: "ENABLED", subnets: subnetIds, securityGroups: [securityGroupId] },
         },
@@ -358,14 +378,14 @@ async function handleStart(interaction: DiscordInteraction) {
     try {
       await postWebhook(
         await getSecret(secretNames.notificationWebhookUrl),
-        `ASA map start requested by <@${userId ?? "unknown"}>.\nMap: ${definition.name}\nSession: ${sessionName}\nEvent: ${eventModLabel(eventModId)}\nIdle auto-stop: ${idleTimeoutMinutes}m\nStatus: STARTING`,
+        `ASA map start requested by <@${userId ?? "unknown"}>.\nMap: ${definition.name}\nSession: ${sessionName}\nCapacity: ${capacityLabel(capacityMode)}\nEvent: ${eventModLabel(eventModId)}\nIdle auto-stop: ${idleTimeoutMinutes}m\nStatus: STARTING`,
       );
     } catch (error) {
       console.error("Failed to post start notification", error);
     }
   }
   return message(
-    `ASA start requested.\nMap: ${definition.name}\nSession: ${sessionName}\nEvent: ${eventModLabel(eventModId)}\nIdle auto-stop: ${idleTimeoutMinutes}m`,
+    `ASA start requested.\nMap: ${definition.name}\nSession: ${sessionName}\nCapacity: ${capacityLabel(capacityMode)}\nEvent: ${eventModLabel(eventModId)}\nIdle auto-stop: ${idleTimeoutMinutes}m`,
     true,
   );
 }
