@@ -69,7 +69,7 @@ flowchart TB
 | 領域 | Resource | 責務 |
 | --- | --- | --- |
 | Entry point | API Gateway、Discord Lambda | Discord署名と権限を検証し、commandをdeferしてstart/stop/statusを調整する。 |
-| Compute | ECS cluster、game task definition | ActiveなMapごとにpublic IP付きFargate taskを1つ起動する。Fargate Spotを優先し、on-demand fallbackは明示的に有効化する。 |
+| Compute | ECS cluster、game task definition | ActiveなMapごとにpublic IP付きFargate taskを1つ起動する。デフォルトはFargate Spotで、起動時に通常Fargateを選択できる。 |
 | Lifecycle | ECS events Lambda、stop Lambda、reconciler、Scheduler | Task stateの確定、接続先の通知、idle stop、staleなstart operationの復旧を行う。 |
 | Persistent state | S3、DynamoDB、EFS | Map archive/runtime object、control-plane state、共有Cross-ARK dataをそれぞれ保存する。 |
 | Image | Stack専用ECR repository | `asaBuildId`で選択するserver imageを保存し、最新2imageを保持する。 |
@@ -209,6 +209,8 @@ IDはJSON array内でもstringとして記載する。**Interactions Endpoint UR
 
 6. Guildで`/asa start`を実行する。
 
+   Spot中断を避ける起動では、`capacity`に`Fargate On-Demand (no Spot interruption)`を選択する。未指定時はFargate Spotを使う。
+
 手順6より前にimageが必要。Endpointの検証とcommand登録より前にDiscord credentialが必要。Destroy/deployでAPI Gateway URLが変わるため、再deploy後はDeveloper Portalも更新する。
 
 ## 設定
@@ -267,7 +269,8 @@ aws s3 cp local/the-island/Game.ini "s3://<AsaStateBucketName>/main/config/maps/
 - Mapごとにidle timeoutとheartbeatを持つ。Heartbeatの欠落やstaleだけでは停止しない。
 - Lambda control planeが月間runtime-hours上限を適用し、保守的なcostとSpot costの見積もりを表示する。
 - AWS Budgetsのemail通知は`enableAwsBudget=true`と`budgetEmail`で任意に有効化する。
-- Fargate on-demand fallbackは`enableOnDemandFallback=true`を指定しない限り無効。
+- `/asa start capacity:on-demand`は通常Fargateだけで起動し、`capacity:spot`はFargate Spotだけで起動する。Discord上では登録済みchoiceから選択する。
+- `capacity`を省略した場合はFargate Spotだけで起動する。
 
 ## コマンド
 

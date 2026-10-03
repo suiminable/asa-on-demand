@@ -37,7 +37,6 @@ export interface AsaControlPlaneProps {
   hourlyCostJpy: number;
   spotHourlyCostJpy: number;
   jpyPerUsd: number;
-  enableOnDemandFallback: boolean;
   allowDiscordPasswordNotification: boolean;
   hostedZoneId?: string;
   hostedZoneName?: string;
@@ -108,7 +107,6 @@ export function createAsaControlPlane(stack: cdk.Stack, props: AsaControlPlanePr
     HOURLY_COST_JPY: String(props.hourlyCostJpy),
     SPOT_HOURLY_COST_JPY: String(props.spotHourlyCostJpy),
     JPY_PER_USD: String(props.jpyPerUsd),
-    ENABLE_ON_DEMAND_FALLBACK: String(props.enableOnDemandFallback),
     ALLOW_DISCORD_PASSWORD_NOTIFICATION: String(props.allowDiscordPasswordNotification),
     DOMAIN_NAME: props.domainName ?? "",
   };

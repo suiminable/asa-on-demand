@@ -220,6 +220,7 @@ describe("Discord map control", () => {
     );
     expect(content).toContain("Scorched Earth");
     expect(content).toContain("private-asa-scorched");
+    expect(content).toContain("Capacity: Fargate Spot");
     expect(content).toContain("Idle auto-stop: 45m");
     expect(mocks.claimMapStart).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -239,6 +240,7 @@ describe("Discord map control", () => {
         clientToken: string;
         startedBy: string;
         tags: Array<{ key: string; value: string }>;
+        capacityProviderStrategy: Array<{ capacityProvider: string; weight: number }>;
         overrides: { containerOverrides: Array<{ environment: Array<{ name: string; value: string }> }> };
       };
     };
@@ -248,8 +250,10 @@ describe("Discord map control", () => {
       expect.arrayContaining([
         { key: "asa:map-id", value: "scorched-earth" },
         { key: "asa:run-id", value: command.input.clientToken },
+        { key: "asa:capacity-mode", value: "spot" },
       ]),
     );
+    expect(command.input.capacityProviderStrategy).toEqual([{ capacityProvider: "FARGATE_SPOT", weight: 1 }]);
     expect(command.input.overrides.containerOverrides[0].environment).toEqual(
       expect.arrayContaining([
         { name: "ASA_MAP_ID", value: "scorched-earth" },
@@ -260,6 +264,30 @@ describe("Discord map control", () => {
     );
     const create = mocks.schedulerSend.mock.calls.map(([value]) => value).find((value) => value.input.ScheduleExpression);
     expect(JSON.parse(create.input.Target.Input)).toMatchObject({ mapId: "scorched-earth", expectedTaskArn: "task-1" });
+  });
+
+  it("runs exclusively on regular Fargate when on-demand capacity is selected", async () => {
+    const content = await runAsync("start", [
+      { name: "map", value: "TheIsland_WP" },
+      { name: "capacity", value: "on-demand" },
+      { name: "public_notify", value: false },
+    ]);
+
+    const command = mocks.ecsSend.mock.calls[0][0] as {
+      input: {
+        capacityProviderStrategy: Array<{ capacityProvider: string; weight: number }>;
+        tags: Array<{ key: string; value: string }>;
+      };
+    };
+    expect(command.input.capacityProviderStrategy).toEqual([{ capacityProvider: "FARGATE", weight: 1 }]);
+    expect(command.input.tags).toContainEqual({ key: "asa:capacity-mode", value: "on-demand" });
+    expect(content).toContain("Capacity: Fargate On-Demand");
+  });
+
+  it("rejects an unknown capacity mode before claiming a map", async () => {
+    expect(await runAsync("start", [{ name: "capacity", value: "invalid" }])).toContain("capacity must be spot or on-demand");
+    expect(mocks.claimMapStart).not.toHaveBeenCalled();
+    expect(mocks.ecsSend).not.toHaveBeenCalled();
   });
 
   it("accepts max_players up to 100", async () => {
