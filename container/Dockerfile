@@ -70,15 +70,25 @@ RUN useradd --create-home --uid 10001 --shell /bin/bash asa \
 
 COPY --from=asa-server --chown=asa:asa /asa/server /asa/server
 
-RUN su -s /bin/bash asa -c 'PROTONPATH=UMU-Latest UMU_RUNTIME_UPDATE=1 umu-run createprefix || true' \
+# ASA runs Proton directly, so installing Steam Runtime through umu-run is unnecessary.
+# Pin and verify Proton without depending on Steam Runtime's mutable latest-public-beta URL.
+ARG UMU_PROTON_VERSION=UMU-Proton-10.0-4
+ARG UMU_PROTON_SHA512=5e1e7c99e773b4d0757f90075c5ff7f5282bedd13a694fc0414486122e68c9452d3fb971f32ab32704d4463c9622475a44e58fbd014069aa1e84e27b4a4ed7e5
+RUN curl -fsSL --retry 3 \
+      "https://github.com/Open-Wine-Components/umu-proton/releases/download/${UMU_PROTON_VERSION}/${UMU_PROTON_VERSION}.tar.gz" \
+      -o /tmp/umu-proton.tar.gz \
+    && printf '%s  /tmp/umu-proton.tar.gz\n' "${UMU_PROTON_SHA512}" | sha512sum -c - \
+    && mkdir -p /opt/umu-data/umu/compatibilitytools \
+    && tar --no-same-owner -xzf /tmp/umu-proton.tar.gz -C /opt/umu-data/umu/compatibilitytools \
+    && ln -s "${UMU_PROTON_VERSION}" /opt/umu-data/umu/compatibilitytools/UMU-Latest \
+    && chown -R asa:asa /opt/umu-data/umu \
     && test -x /opt/umu-data/umu/compatibilitytools/UMU-Latest/proton \
-    && find /opt/umu-data/umu -name VERSIONS.txt -print -quit | grep -q . \
-    && rm -rf /opt/umu-data/umu/steamrt3 /opt/umu-data/umu/umu-shim
+    && rm /tmp/umu-proton.tar.gz
 
 ENV PROTONPATH=/opt/umu-data/umu/compatibilitytools/UMU-Latest \
     UMU_RUNTIME_UPDATE=0
 
-RUN su -s /bin/bash asa -c 'mkdir -p /home/asa/.local/share/Steam \
+RUN su -s /bin/bash asa -c 'mkdir -p /home/asa/.local/share/Steam "$WINEPREFIX" \
     && export STEAM_COMPAT_CLIENT_INSTALL_PATH=/home/asa/.local/share/Steam \
     STEAM_COMPAT_DATA_PATH=/asa/work/proton-prefix \
     STEAM_COMPAT_INSTALL_PATH=/asa/server \
